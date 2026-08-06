@@ -1,0 +1,35 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #101820;
+  color: #f4f1ea;
+}
+
+body {
+  margin: 0;
+}
+
+.page {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 18vh 2rem 4rem;
+}
+
+.eyebrow {
+  color: #d6a84b;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0.5rem 0 1rem;
+  font-size: clamp(2.5rem, 8vw, 5rem);
+  line-height: 0.95;
+}
+
+p {
+  max-width: 38rem;
+  font-size: 1.15rem;
+  line-height: 1.65;
+}
