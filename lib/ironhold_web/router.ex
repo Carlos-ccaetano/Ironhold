@@ -13,9 +13,19 @@ defmodule IronholdWeb.Router do
     }
   end
 
+  pipeline :api do
+    plug :accepts, ["json"]
+  end
+
   scope "/", IronholdWeb do
     pipe_through :browser
 
     get "/", PageController, :home
+  end
+
+  scope "/api", IronholdWeb do
+    pipe_through :api
+
+    post "/webhooks", WebhookController, :create
   end
 end

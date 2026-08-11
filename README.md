@@ -4,9 +4,9 @@ Ironhold is the companion service to Tidewake. Tidewake focuses on reliable webh
 
 ## Current status
 
-This repository contains only the project foundation: a small Phoenix application, PostgreSQL integration, a landing page, automated quality checks, and initial documentation.
+This repository contains the project foundation and an initial webhook ingestion endpoint that persists received event envelopes.
 
-Webhook ingestion, HMAC validation, replay protection, rate limiting, authentication, complete auditing, and a dashboard are deliberately not implemented yet. They are planned as separate increments so that each security decision can be reviewed on its own.
+HMAC validation, replay protection, rate limiting, authentication, complete auditing, and a dashboard are deliberately not implemented yet. They are planned as separate increments so that each security decision can be reviewed on its own.
 
 ## Stack
 
