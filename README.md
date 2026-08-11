@@ -70,6 +70,8 @@ mix test
 
 The next increments will define webhook ingestion contracts, add integrity and replay protections, introduce operational controls and audit retention, and only then consider an authenticated dashboard. See [docs/roadmap.md](docs/roadmap.md) for the staged plan.
 
+The initial HTTP contract is documented in [docs/api/webhooks.md](docs/api/webhooks.md).
+
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [SECURITY.md](SECURITY.md) for responsible vulnerability reporting.
