@@ -28,6 +28,36 @@ defmodule Ironhold.WebhooksTest do
                received_at: ["can't be blank"]
              }
     end
+
+    test "accepts event id and event type with 255 characters" do
+      attrs = %{
+        @valid_attrs
+        | event_id: String.duplicate("i", 255),
+          event_type: String.duplicate("t", 255)
+      }
+
+      attrs = Map.put(attrs, :received_at, @received_at)
+
+      assert ReceivedWebhook.changeset(%ReceivedWebhook{}, attrs).valid?
+    end
+
+    test "associates length errors with each field" do
+      attrs = %{
+        @valid_attrs
+        | event_id: String.duplicate("i", 256),
+          event_type: String.duplicate("t", 256)
+      }
+
+      changeset =
+        attrs
+        |> Map.put(:received_at, @received_at)
+        |> then(&ReceivedWebhook.changeset(%ReceivedWebhook{}, &1))
+
+      assert errors_on(changeset) == %{
+               event_id: ["should be at most 255 character(s)"],
+               event_type: ["should be at most 255 character(s)"]
+             }
+    end
   end
 
   describe "receive_webhook/2" do
@@ -46,6 +76,19 @@ defmodule Ironhold.WebhooksTest do
     test "rejects a duplicate event id" do
       assert {:ok, _webhook} = Webhooks.receive_webhook(@valid_attrs, @received_at)
       assert {:error, :duplicate_event_id} = Webhooks.receive_webhook(@valid_attrs, @received_at)
+    end
+
+    test "does not persist an envelope with fields longer than 255 characters" do
+      attrs = %{
+        @valid_attrs
+        | event_id: String.duplicate("i", 256),
+          event_type: String.duplicate("t", 256)
+      }
+
+      assert {:error, changeset} = Webhooks.receive_webhook(attrs, @received_at)
+      assert Map.has_key?(errors_on(changeset), :event_id)
+      assert Map.has_key?(errors_on(changeset), :event_type)
+      assert Repo.aggregate(ReceivedWebhook, :count) == 0
     end
   end
 end
