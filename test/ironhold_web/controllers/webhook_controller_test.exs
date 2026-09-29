@@ -1,6 +1,12 @@
 defmodule IronholdWeb.WebhookControllerTest do
   use IronholdWeb.ConnCase, async: true
 
+  import ExUnit.CaptureLog
+
+  alias Ironhold.Repo
+  alias Ironhold.Webhooks.ReceivedWebhook
+
+  @max_body_size 262_144
   @valid_webhook %{
     id: "evt_123",
     type: "order.created",
@@ -13,8 +19,7 @@ defmodule IronholdWeb.WebhookControllerTest do
   test "POST /api/webhooks accepts and stores a valid webhook", %{conn: conn} do
     conn =
       conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", @valid_webhook)
+      |> post_json(Jason.encode!(@valid_webhook))
 
     assert json_response(conn, 202) == %{
              "data" => %{
@@ -22,6 +27,83 @@ defmodule IronholdWeb.WebhookControllerTest do
                "status" => "accepted"
              }
            }
+  end
+
+  test "POST /api/webhooks accepts a real JSON body clearly below the limit", %{conn: conn} do
+    body = json_body_with_size(200_000, "evt_below_limit")
+
+    assert byte_size(body) == 200_000
+
+    conn = post_json(conn, body)
+
+    assert json_response(conn, 202) == %{
+             "data" => %{
+               "event_id" => "evt_below_limit",
+               "status" => "accepted"
+             }
+           }
+  end
+
+  test "POST /api/webhooks accepts a body at the exact byte limit", %{conn: conn} do
+    body = json_body_with_size(@max_body_size, "evt_at_limit")
+
+    assert byte_size(body) == @max_body_size
+
+    conn = post_json(conn, body)
+
+    assert json_response(conn, 202) == %{
+             "data" => %{
+               "event_id" => "evt_at_limit",
+               "status" => "accepted"
+             }
+           }
+  end
+
+  test "POST /api/webhooks rejects an oversized body without persisting and remains available",
+       %{conn: conn} do
+    marker = "rejected-body-must-not-leak"
+
+    body =
+      Jason.encode!(%{
+        @valid_webhook
+        | id: "evt_too_large",
+          data: %{marker: marker, padding: String.duplicate("x", @max_body_size)}
+      })
+
+    assert byte_size(body) > @max_body_size
+
+    test_process = self()
+
+    log =
+      capture_log(fn ->
+        response = assert_error_sent(413, fn -> post_json(conn, body) end)
+        send(test_process, {:oversized_response, response})
+      end)
+
+    assert_receive {:oversized_response, {413, _headers, response_body}}
+
+    assert Jason.decode!(response_body) == %{
+             "errors" => [
+               %{"detail" => "request body exceeds the 262144-byte limit"}
+             ]
+           }
+
+    refute response_body =~ marker
+    refute log =~ marker
+    assert Repo.aggregate(ReceivedWebhook, :count) == 0
+
+    next_response =
+      build_conn()
+      |> post_json(Jason.encode!(%{@valid_webhook | id: "evt_after_rejection"}))
+
+    assert json_response(next_response, 202) == %{
+             "data" => %{
+               "event_id" => "evt_after_rejection",
+               "status" => "accepted"
+             }
+           }
+
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
   end
 
   test "POST /api/webhooks accepts 255-character id and type fields", %{conn: conn} do
@@ -122,6 +204,26 @@ defmodule IronholdWeb.WebhookControllerTest do
   end
 
   defp accept_json(conn), do: put_req_header(conn, "accept", "application/json")
+
+  defp post_json(conn, body) do
+    conn
+    |> accept_json()
+    |> put_req_header("content-type", "application/json")
+    |> post(~p"/api/webhooks", body)
+  end
+
+  defp json_body_with_size(size, event_id) do
+    envelope = %{
+      "id" => event_id,
+      "type" => "order.created",
+      "data" => %{"padding" => ""}
+    }
+
+    padding_size = size - byte_size(Jason.encode!(envelope))
+
+    put_in(envelope, ["data", "padding"], String.duplicate("x", padding_size))
+    |> Jason.encode!()
+  end
 
   defp invalid_webhook_response(conn) do
     assert json_response(conn, 422) == %{
