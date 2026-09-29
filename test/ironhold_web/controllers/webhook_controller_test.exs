@@ -24,6 +24,23 @@ defmodule IronholdWeb.WebhookControllerTest do
            }
   end
 
+  test "POST /api/webhooks accepts 255-character id and type fields", %{conn: conn} do
+    event_id = String.duplicate("i", 255)
+    webhook = %{@valid_webhook | id: event_id, type: String.duplicate("t", 255)}
+
+    conn =
+      conn
+      |> accept_json()
+      |> post(~p"/api/webhooks", webhook)
+
+    assert json_response(conn, 202) == %{
+             "data" => %{
+               "event_id" => event_id,
+               "status" => "accepted"
+             }
+           }
+  end
+
   test "POST /api/webhooks requires an id", %{conn: conn} do
     webhook = Map.delete(@valid_webhook, :id)
 
@@ -49,6 +66,24 @@ defmodule IronholdWeb.WebhookControllerTest do
       conn
       |> accept_json()
       |> post(~p"/api/webhooks", %{@valid_webhook | data: ["not", "an", "object"]})
+
+    assert invalid_webhook_response(conn)
+  end
+
+  test "POST /api/webhooks rejects an id longer than 255 characters", %{conn: conn} do
+    conn =
+      conn
+      |> accept_json()
+      |> post(~p"/api/webhooks", %{@valid_webhook | id: String.duplicate("i", 256)})
+
+    assert invalid_webhook_response(conn)
+  end
+
+  test "POST /api/webhooks rejects a type longer than 255 characters", %{conn: conn} do
+    conn =
+      conn
+      |> accept_json()
+      |> post(~p"/api/webhooks", %{@valid_webhook | type: String.duplicate("t", 256)})
 
     assert invalid_webhook_response(conn)
   end
