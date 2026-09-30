@@ -29,6 +29,89 @@ defmodule IronholdWeb.WebhookControllerTest do
            }
   end
 
+  test "POST /api/webhooks accepts application/json with charset", %{conn: conn} do
+    body = Jason.encode!(%{@valid_webhook | id: "evt_with_charset"})
+
+    conn = post_with_content_type(conn, body, "application/json; charset=utf-8")
+
+    assert json_response(conn, 202) == %{
+             "data" => %{
+               "event_id" => "evt_with_charset",
+               "status" => "accepted"
+             }
+           }
+  end
+
+  test "POST /api/webhooks rejects a missing content type before the controller", %{conn: conn} do
+    conn =
+      conn
+      |> accept_json()
+      |> post(~p"/api/webhooks")
+
+    assert_unsupported_media_type(conn)
+    assert Repo.aggregate(ReceivedWebhook, :count) == 0
+  end
+
+  test "POST /api/webhooks rejects non-JSON media types before parsing", %{conn: _conn} do
+    requests = [
+      {"text/plain", Jason.encode!(@valid_webhook)},
+      {"application/x-www-form-urlencoded", "id=evt_form&type=order.created"},
+      {"multipart/form-data; boundary=ironhold", "--ironhold--"}
+    ]
+
+    Enum.each(requests, fn {content_type, body} ->
+      response = post_with_content_type(build_conn(), body, content_type)
+
+      assert_unsupported_media_type(response)
+    end)
+
+    assert Repo.aggregate(ReceivedWebhook, :count) == 0
+  end
+
+  test "POST /api/webhooks rejects duplicate content-type headers", %{conn: conn} do
+    body = Jason.encode!(%{@valid_webhook | id: "evt_duplicate_header"})
+
+    conn =
+      conn
+      |> accept_json()
+      |> prepend_req_headers([
+        {"content-type", "application/json"},
+        {"content-type", "text/plain"}
+      ])
+      |> post(~p"/api/webhooks", body)
+
+    assert_unsupported_media_type(conn)
+    assert Repo.aggregate(ReceivedWebhook, :count) == 0
+  end
+
+  test "POST /api/webhooks rejects an oversized form body without reading or exposing it",
+       %{conn: conn} do
+    marker = "rejected-form-body-must-not-leak"
+    header_marker = "rejected-header-must-not-leak"
+    body = "data=#{marker}" <> String.duplicate("x", @max_body_size)
+    test_process = self()
+
+    log =
+      capture_log(fn ->
+        response =
+          post_with_content_type(
+            conn,
+            body,
+            "application/x-www-form-urlencoded; marker=#{header_marker}"
+          )
+
+        send(test_process, {:unsupported_media_type_response, response})
+      end)
+
+    assert_receive {:unsupported_media_type_response, response}
+    assert_unsupported_media_type(response)
+    refute response.resp_body =~ marker
+    refute response.resp_body =~ header_marker
+    refute log =~ marker
+    refute log =~ header_marker
+    assert Repo.aggregate(ReceivedWebhook, :count) == 0
+  end
+
   test "POST /api/webhooks accepts a real JSON body clearly below the limit", %{conn: conn} do
     body = json_body_with_size(200_000, "evt_below_limit")
 
@@ -110,10 +193,7 @@ defmodule IronholdWeb.WebhookControllerTest do
     event_id = String.duplicate("i", 255)
     webhook = %{@valid_webhook | id: event_id, type: String.duplicate("t", 255)}
 
-    conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", webhook)
+    conn = post_json(conn, Jason.encode!(webhook))
 
     assert json_response(conn, 202) == %{
              "data" => %{
@@ -126,61 +206,45 @@ defmodule IronholdWeb.WebhookControllerTest do
   test "POST /api/webhooks requires an id", %{conn: conn} do
     webhook = Map.delete(@valid_webhook, :id)
 
-    conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", webhook)
+    conn = post_json(conn, Jason.encode!(webhook))
 
     assert invalid_webhook_response(conn)
   end
 
   test "POST /api/webhooks requires a non-empty string type", %{conn: conn} do
-    conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", %{@valid_webhook | type: "   "})
+    conn = post_json(conn, Jason.encode!(%{@valid_webhook | type: "   "}))
 
     assert invalid_webhook_response(conn)
   end
 
   test "POST /api/webhooks requires data to be a JSON object", %{conn: conn} do
-    conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", %{@valid_webhook | data: ["not", "an", "object"]})
+    conn = post_json(conn, Jason.encode!(%{@valid_webhook | data: ["not", "an", "object"]}))
 
     assert invalid_webhook_response(conn)
   end
 
   test "POST /api/webhooks rejects an id longer than 255 characters", %{conn: conn} do
     conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", %{@valid_webhook | id: String.duplicate("i", 256)})
+      post_json(conn, Jason.encode!(%{@valid_webhook | id: String.duplicate("i", 256)}))
 
     assert invalid_webhook_response(conn)
   end
 
   test "POST /api/webhooks rejects a type longer than 255 characters", %{conn: conn} do
     conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", %{@valid_webhook | type: String.duplicate("t", 256)})
+      post_json(conn, Jason.encode!(%{@valid_webhook | type: String.duplicate("t", 256)}))
 
     assert invalid_webhook_response(conn)
   end
 
   test "POST /api/webhooks rejects a duplicate event id", %{conn: conn} do
-    conn =
-      conn
-      |> accept_json()
-      |> post(~p"/api/webhooks", @valid_webhook)
+    body = Jason.encode!(@valid_webhook)
+    conn = post_json(conn, body)
 
     duplicate_conn =
       conn
       |> recycle()
-      |> accept_json()
-      |> post(~p"/api/webhooks", @valid_webhook)
+      |> post_json(body)
 
     assert json_response(duplicate_conn, 409) == %{
              "errors" => [
@@ -206,9 +270,13 @@ defmodule IronholdWeb.WebhookControllerTest do
   defp accept_json(conn), do: put_req_header(conn, "accept", "application/json")
 
   defp post_json(conn, body) do
+    post_with_content_type(conn, body, "application/json")
+  end
+
+  defp post_with_content_type(conn, body, content_type) do
     conn
     |> accept_json()
-    |> put_req_header("content-type", "application/json")
+    |> put_req_header("content-type", content_type)
     |> post(~p"/api/webhooks", body)
   end
 
@@ -231,6 +299,16 @@ defmodule IronholdWeb.WebhookControllerTest do
                %{
                  "detail" => "id, type, and data must be provided in the expected format"
                }
+             ]
+           }
+  end
+
+  defp assert_unsupported_media_type(conn) do
+    assert conn.halted
+
+    assert json_response(conn, 415) == %{
+             "errors" => [
+               %{"detail" => "content type must be application/json"}
              ]
            }
   end

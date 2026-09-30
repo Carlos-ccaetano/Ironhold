@@ -20,6 +20,7 @@ defmodule IronholdWeb.Endpoint do
   end
 
   plug Plug.RequestId
+  plug IronholdWeb.Plugs.RequireJsonContentType
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
   plug Plug.Parsers,
