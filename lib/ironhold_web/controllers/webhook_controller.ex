@@ -2,6 +2,7 @@ defmodule IronholdWeb.WebhookController do
   use IronholdWeb, :controller
 
   alias Ironhold.Webhooks
+  alias IronholdWeb.Telemetry
 
   @invalid_webhook_message "id, type, and data must be provided in the expected format"
   @duplicate_webhook_message "a webhook with this id has already been received"
@@ -9,6 +10,8 @@ defmodule IronholdWeb.WebhookController do
   def create(conn, params) do
     with {:ok, attrs} <- webhook_attrs(params),
          {:ok, webhook} <- Webhooks.receive_webhook(attrs) do
+      Telemetry.emit_ingestion_accepted()
+
       conn
       |> put_status(:accepted)
       |> json(%{
@@ -19,13 +22,18 @@ defmodule IronholdWeb.WebhookController do
       })
     else
       {:error, :duplicate_event_id} ->
-        error_response(conn, :conflict, @duplicate_webhook_message)
+        rejection_response(
+          conn,
+          :conflict,
+          @duplicate_webhook_message,
+          :duplicate_event_id
+        )
 
       {:error, %Ecto.Changeset{}} ->
-        error_response(conn, :unprocessable_entity, @invalid_webhook_message)
+        rejection_response(conn, :unprocessable_entity, @invalid_webhook_message, :validation)
 
       {:error, :invalid_webhook} ->
-        error_response(conn, :unprocessable_entity, @invalid_webhook_message)
+        rejection_response(conn, :unprocessable_entity, @invalid_webhook_message, :validation)
     end
   end
 
@@ -41,7 +49,9 @@ defmodule IronholdWeb.WebhookController do
 
   defp non_empty_string?(value), do: is_binary(value) and String.trim(value) != ""
 
-  defp error_response(conn, status, detail) do
+  defp rejection_response(conn, status, detail, reason) do
+    Telemetry.emit_ingestion_rejected(reason)
+
     conn
     |> put_status(status)
     |> json(%{errors: [%{detail: detail}]})

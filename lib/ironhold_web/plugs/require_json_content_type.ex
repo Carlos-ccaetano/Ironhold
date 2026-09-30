@@ -5,6 +5,7 @@ defmodule IronholdWeb.Plugs.RequireJsonContentType do
 
   import Plug.Conn
 
+  alias IronholdWeb.Telemetry
   alias Plug.Conn.Utils
 
   @behaviour Plug
@@ -34,6 +35,8 @@ defmodule IronholdWeb.Plugs.RequireJsonContentType do
   end
 
   defp reject(conn) do
+    Telemetry.emit_ingestion_rejected(:unsupported_media_type)
+
     body =
       Phoenix.json_library().encode!(%{
         errors: [%{detail: @unsupported_media_type_message}]

@@ -1,11 +1,13 @@
 defmodule IronholdWeb.WebhookControllerTest do
-  use IronholdWeb.ConnCase, async: true
+  use IronholdWeb.ConnCase, async: false
 
   import ExUnit.CaptureLog
 
   alias Ironhold.Repo
   alias Ironhold.Webhooks.ReceivedWebhook
 
+  @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
+  @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
   @max_body_size 262_144
   @valid_webhook %{
     id: "evt_123",
@@ -17,9 +19,14 @@ defmodule IronholdWeb.WebhookControllerTest do
   }
 
   test "POST /api/webhooks accepts and stores a valid webhook", %{conn: conn} do
+    attach_ingestion_events("evt_123")
+
     conn =
       conn
       |> post_json(Jason.encode!(@valid_webhook))
+
+    assert_receive {:ingestion_event, @accepted_event, %{count: 1}, %{}, true}
+    refute_receive {:ingestion_event, _, _, _, _}
 
     assert json_response(conn, 202) == %{
              "data" => %{
@@ -53,6 +60,8 @@ defmodule IronholdWeb.WebhookControllerTest do
   end
 
   test "POST /api/webhooks rejects non-JSON media types before parsing", %{conn: _conn} do
+    attach_ingestion_events()
+
     requests = [
       {"text/plain", Jason.encode!(@valid_webhook)},
       {"application/x-www-form-urlencoded", "id=evt_form&type=order.created"},
@@ -63,8 +72,12 @@ defmodule IronholdWeb.WebhookControllerTest do
       response = post_with_content_type(build_conn(), body, content_type)
 
       assert_unsupported_media_type(response)
+
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1},
+                      %{reason: :unsupported_media_type}, false}
     end)
 
+    refute_receive {:ingestion_event, _, _, _, _}
     assert Repo.aggregate(ReceivedWebhook, :count) == 0
   end
 
@@ -204,10 +217,14 @@ defmodule IronholdWeb.WebhookControllerTest do
   end
 
   test "POST /api/webhooks requires an id", %{conn: conn} do
+    attach_ingestion_events()
     webhook = Map.delete(@valid_webhook, :id)
 
     conn = post_json(conn, Jason.encode!(webhook))
 
+    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :validation}, false}
+
+    refute_receive {:ingestion_event, _, _, _, _}
     assert invalid_webhook_response(conn)
   end
 
@@ -240,11 +257,17 @@ defmodule IronholdWeb.WebhookControllerTest do
   test "POST /api/webhooks rejects a duplicate event id", %{conn: conn} do
     body = Jason.encode!(@valid_webhook)
     conn = post_json(conn, body)
+    attach_ingestion_events()
 
     duplicate_conn =
       conn
       |> recycle()
       |> post_json(body)
+
+    assert_receive {:ingestion_event, @rejected_event, %{count: 1},
+                    %{reason: :duplicate_event_id}, false}
+
+    refute_receive {:ingestion_event, _, _, _, _}
 
     assert json_response(duplicate_conn, 409) == %{
              "errors" => [
@@ -311,5 +334,26 @@ defmodule IronholdWeb.WebhookControllerTest do
                %{"detail" => "content type must be application/json"}
              ]
            }
+  end
+
+  defp attach_ingestion_events(event_id \\ nil) do
+    handler_id = {__MODULE__, self(), make_ref()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [@accepted_event, @rejected_event],
+        fn event, measurements, metadata, _config ->
+          persisted =
+            event == @accepted_event and
+              not is_nil(Repo.get_by(ReceivedWebhook, event_id: event_id))
+
+          send(test_pid, {:ingestion_event, event, measurements, metadata, persisted})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 end
