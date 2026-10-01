@@ -22,9 +22,13 @@ Content-Type: application/json
 
 The request body must be a JSON object with these fields:
 
-- `id` is a non-empty string that uniquely identifies the event. Ironhold uses it to reject duplicate deliveries.
-- `type` is a non-empty string that identifies the event kind.
+- `id` is a non-empty string of at most 255 characters that uniquely identifies the event. Ironhold uses it to reject duplicate deliveries.
+- `type` is a non-empty string of at most 255 characters that identifies the event kind.
 - `data` is a JSON object containing the event payload. Its shape depends on `type`.
+
+The request must contain exactly one `Content-Type` header with the `application/json` media type. Media-type parameters such as `charset=utf-8` are allowed. A missing, duplicate, ambiguous, or incompatible content type returns `415 Unsupported Media Type` with the stable detail `content type must be application/json`.
+
+The raw request body may contain at most `262_144` bytes. A body at that exact limit is accepted; a larger body returns `413 Payload Too Large` with the stable detail `request body exceeds the 262144-byte limit`. Both HTTP boundary checks run before persistence.
 
 ## Responses
 
@@ -63,8 +67,10 @@ Ironhold returns `409 Conflict` when a webhook with the same `id` has already be
 }
 ```
 
+Accepted ingestion emits Telemetry. Validation, duplicate-ID, and unsupported-media-type rejections emit rejection Telemetry with bounded reasons.
+
 ## Current limitations
 
-This first contract only accepts and stores webhook envelopes. It does not authenticate senders, process event-specific payloads, or provide delivery status lookup.
+This contract only accepts and stores webhook envelopes. It does not authenticate senders, process event-specific payloads, or provide delivery status lookup.
 
-Signature and timestamp headers will be defined in a later contract. HMAC validation, timestamp validation, replay protection, and rate limiting are intentionally not implemented yet.
+[ADR 0003](../adr/0003-signed-webhook-verification.md) defines the future HMAC signature and timestamp contract, but it is not implemented. Ironhold does not yet verify signatures, validate timestamps, preserve raw body bytes for HMAC, prevent replay, rotate secrets, rate-limit ingestion, or provide an operational dashboard.
