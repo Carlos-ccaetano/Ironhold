@@ -8,9 +8,11 @@ The initial receiving increment is implemented: Ironhold accepts webhook envelop
 
 ## Current runtime
 
-An HTTP request reaches `IronholdWeb.Endpoint`, passes through the router's JSON `:api` pipeline, and reaches `IronholdWeb.WebhookController.create/2`. A valid envelope contains non-empty string `id` and `type` fields plus an object-valued `data` field. The controller maps those public names to `event_id`, `event_type`, and `payload`, then delegates persistence to `Ironhold.Webhooks`.
+An HTTP request reaches `IronholdWeb.Endpoint`, where `IronholdWeb.Plugs.RequireJsonContentType` requires a single `application/json` media type for API requests with bodies and returns `415 Unsupported Media Type` otherwise. `Plug.Parsers` accepts raw JSON bodies up to and including `262_144` bytes; larger bodies return the stable `413 Payload Too Large` response before controller or persistence work. The request then passes through the router's JSON `:api` pipeline and reaches `IronholdWeb.WebhookController.create/2`.
 
-The context supplies `received_at` and inserts an `Ironhold.Webhooks.ReceivedWebhook` schema. The `received_webhooks` table stores `event_id`, `event_type`, `payload`, and `received_at`, with a unique database index on `event_id`. A successful insert returns `202 Accepted`; a duplicate `event_id` is normalized by the context and returned as `409 Conflict`; invalid input returns `422 Unprocessable Entity`.
+A valid envelope contains non-empty string `id` and `type` fields of at most 255 characters plus an object-valued `data` field. The controller maps those public names to `event_id`, `event_type`, and `payload`, then delegates persistence to `Ironhold.Webhooks`.
+
+The context supplies `received_at` and inserts an `Ironhold.Webhooks.ReceivedWebhook` schema. The `received_webhooks` table stores `event_id`, `event_type`, `payload`, and `received_at`, with a unique database index on `event_id`. A successful insert returns `202 Accepted`; a duplicate `event_id` is normalized by the context and returned as `409 Conflict`; invalid input returns `422 Unprocessable Entity`. Accepted ingestion and rejections for validation, duplicate IDs, or unsupported media types emit bounded Telemetry events and counters.
 
 `Ironhold.Application` supervises the endpoint, the Ecto repository, and the Telemetry supervisor. PostgreSQL is the only local infrastructure dependency.
 
@@ -20,11 +22,11 @@ The context supplies `received_at` and inserts an `Ironhold.Webhooks.ReceivedWeb
 
 The controller owns HTTP request and response semantics, including validation of the public envelope shape and the `202`, `409`, and `422` responses. The `Ironhold.Webhooks` context owns the receive use case, receipt-time assignment, persistence, and normalization of unique-index conflicts. `ReceivedWebhook` owns the persisted field and changeset constraints. This keeps Phoenix concerns out of the schema and database details out of the controller.
 
-The current endpoint accepts and stores the envelope only. Explicit HTTP request and payload-size limits, supported-content-type policy beyond the current JSON pipeline, and downstream event processing remain pending.
+The current endpoint enforces the JSON media-type, raw-body-size, envelope-shape, field-length, and duplicate-ID boundaries before or during persistence. It accepts and stores the envelope only; downstream event processing remains pending.
 
 ### Security
 
-Will validate authenticity and freshness. Versioned HMAC verification, signed timestamp validation, replay prevention, rate limiting, and authentication belong here and must be introduced with explicit threat models and tests.
+ADR 0003 defines the versioned HMAC receiver contract and verification order, but no verification code is implemented. Signature verification, temporal validation, raw-body preservation for HMAC, replay protection, secret rotation, rate limiting, and authentication belong here and must be introduced with explicit threat models and tests.
 
 ### Audit
 
@@ -32,7 +34,7 @@ Will record security-relevant decisions and webhook processing outcomes with del
 
 ### Observability
 
-Will turn Telemetry events into useful metrics, traces, alerts, and service-level signals. The current Telemetry wiring is only the instrumentation foundation.
+Ingestion emits accepted and rejected Telemetry events, with counters for accepted requests and bounded rejection reasons. Reporters, traces, alerts, service-level signals, and an operational dashboard remain future work.
 
 ## Dependency direction
 
@@ -40,4 +42,4 @@ The HTTP layer calls the `Ironhold.Webhooks` context rather than persisting sche
 
 ## Security posture
 
-The webhook ingestion endpoint is available, but accepting and persisting an envelope is not proof that it is authentic, fresh, or safe to process. Ironhold does not yet enforce explicit HTTP limits, HMAC signatures, signed timestamps, replay protection, rate limiting, or sender authentication. Complete audit records and dashboard access are also not implemented.
+The webhook ingestion endpoint enforces its current media-type, raw-body-size, envelope-shape, field-length, and duplicate-ID boundaries, but accepting and persisting an envelope is not proof that it is authentic, fresh, or safe to process. Ironhold does not yet verify HMAC signatures, validate signed timestamps, preserve raw body bytes for HMAC, prevent replay, rotate secrets, rate-limit ingestion, or authenticate senders. ADR 0003 is a design contract, not an implemented feature. Complete audit records and an operational dashboard are also not implemented.
