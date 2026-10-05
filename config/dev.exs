@@ -1,5 +1,9 @@
 import Config
 
+config :ironhold,
+       :webhook_signing_secret,
+       "dev-only-webhook-signing-secret-not-for-production"
+
 database_config =
   case System.get_env("DATABASE_URL") do
     nil ->
