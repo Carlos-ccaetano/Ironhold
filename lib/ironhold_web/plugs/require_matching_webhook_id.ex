@@ -3,7 +3,7 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookId do
   Requires the authenticated webhook ID to match the decoded body ID.
   """
 
-  alias IronholdWeb.WebhookAuthentication
+  alias IronholdWeb.{Telemetry, WebhookAuthentication}
 
   @behaviour Plug
 
@@ -25,5 +25,8 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookId do
     conn
   end
 
-  def call(conn, _opts), do: WebhookAuthentication.reject(conn)
+  def call(conn, _opts) do
+    Telemetry.emit_authentication_identifier_mismatch()
+    WebhookAuthentication.reject(conn)
+  end
 end

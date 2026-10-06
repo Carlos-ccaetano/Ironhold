@@ -6,6 +6,9 @@ defmodule IronholdWeb.Telemetry do
 
   @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
   @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
+  @authentication_verified_event [:ironhold, :webhooks, :authentication, :verified]
+  @authentication_rejected_event [:ironhold, :webhooks, :authentication, :rejected]
+  @identifier_mismatch_event [:ironhold, :webhooks, :authentication, :identifier_mismatch]
   @rejection_reasons [:validation, :duplicate_event_id, :unsupported_media_type]
 
   def start_link(arg) do
@@ -29,10 +32,25 @@ defmodule IronholdWeb.Telemetry do
     :telemetry.execute(@rejected_event, %{count: 1}, %{reason: reason})
   end
 
+  def emit_authentication_verified do
+    :telemetry.execute(@authentication_verified_event, %{count: 1}, %{})
+  end
+
+  def emit_authentication_rejected do
+    :telemetry.execute(@authentication_rejected_event, %{count: 1}, %{})
+  end
+
+  def emit_authentication_identifier_mismatch do
+    :telemetry.execute(@identifier_mismatch_event, %{count: 1}, %{})
+  end
+
   def metrics do
     [
       counter("ironhold.webhooks.ingestion.accepted.count"),
       counter("ironhold.webhooks.ingestion.rejected.count", tags: [:reason]),
+      counter("ironhold.webhooks.authentication.verified.count"),
+      counter("ironhold.webhooks.authentication.rejected.count"),
+      counter("ironhold.webhooks.authentication.identifier_mismatch.count"),
       summary("phoenix.endpoint.stop.duration", unit: {:native, :millisecond}),
       summary("phoenix.router_dispatch.stop.duration",
         tags: [:route],

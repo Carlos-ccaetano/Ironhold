@@ -20,5 +20,17 @@ defmodule IronholdWeb.TelemetryTest do
            } = metric(metrics, [:ironhold, :webhooks, :ingestion, :rejected, :count])
   end
 
+  test "declares untagged authentication counters" do
+    metrics = IronholdTelemetry.metrics()
+
+    for event <- [:verified, :rejected, :identifier_mismatch] do
+      assert %Counter{
+               event_name: [:ironhold, :webhooks, :authentication, ^event],
+               measurement: :count,
+               tags: []
+             } = metric(metrics, [:ironhold, :webhooks, :authentication, event, :count])
+    end
+  end
+
   defp metric(metrics, name), do: Enum.find(metrics, &(&1.name == name))
 end

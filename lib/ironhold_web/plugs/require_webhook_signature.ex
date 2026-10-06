@@ -7,6 +7,7 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
 
   alias Ironhold.Ingestion.Signature
   alias IronholdWeb.ErrorJSON
+  alias IronholdWeb.Telemetry
   alias IronholdWeb.WebhookAuthentication
 
   @behaviour Plug
@@ -33,12 +34,14 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
              secret,
              System.system_time(:second)
            ) do
+      Telemetry.emit_authentication_verified()
+
       conn
       |> put_private(@authenticated_body_private_key, body)
       |> put_private(@authenticated_id_private_key, verified_id)
     else
       {:error, :payload_too_large, conn} -> payload_too_large(conn)
-      _authentication_failure -> WebhookAuthentication.reject(conn)
+      _authentication_failure -> reject(conn)
     end
   end
 
@@ -76,6 +79,8 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
   end
 
   defp payload_too_large(conn) do
+    Telemetry.emit_authentication_rejected()
+
     body =
       "413.json"
       |> ErrorJSON.render(%{})
@@ -85,5 +90,10 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
     |> put_resp_content_type("application/json")
     |> send_resp(413, body)
     |> halt()
+  end
+
+  defp reject(conn) do
+    Telemetry.emit_authentication_rejected()
+    WebhookAuthentication.reject(conn)
   end
 end
