@@ -9,19 +9,25 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookIdTest do
   alias IronholdWeb.Plugs.RequireMatchingWebhookId
 
   @authenticated_id_private_key :ironhold_authenticated_webhook_id
+  @identifier_mismatch_event [:ironhold, :webhooks, :authentication, :identifier_mismatch]
   @invalid_signature_response ~s({"errors":[{"detail":"valid webhook signature required"}]})
   @opts RequireMatchingWebhookId.init([])
 
   test "continues with the unchanged connection when IDs match" do
+    attach_identifier_mismatch_event()
     conn = matching_conn("evt_test_123", %{"id" => "evt_test_123"})
 
     assert RequireMatchingWebhookId.call(conn, @opts) == conn
+    refute_receive {:identifier_mismatch_event, _, _}
   end
 
-  test "rejects different IDs" do
+  test "rejects different IDs and emits one bounded mismatch event" do
+    attach_identifier_mismatch_event()
     conn = matching_conn("evt_header", %{"id" => "evt_body"})
 
     assert_authentication_failure(conn)
+    assert_receive {:identifier_mismatch_event, %{count: 1}, %{}}
+    refute_receive {:identifier_mismatch_event, _, _}
   end
 
   test "compares IDs case-sensitively" do
@@ -115,5 +121,22 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookIdTest do
     assert returned_conn.halted
     assert returned_conn.status == 401
     assert returned_conn.resp_body == @invalid_signature_response
+  end
+
+  defp attach_identifier_mismatch_event do
+    handler_id = {__MODULE__, self(), make_ref()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @identifier_mismatch_event,
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:identifier_mismatch_event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 end
