@@ -22,10 +22,12 @@ defmodule IronholdWeb.Endpoint do
   plug Plug.RequestId
   plug IronholdWeb.Plugs.RequireJsonContentType
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug IronholdWeb.Plugs.RequireWebhookSignature
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, {:json, length: 262_144}],
     pass: ["*/*"],
+    body_reader: {IronholdWeb.WebhookBodyReader, :read_body, []},
     json_decoder: Phoenix.json_library()
 
   plug Plug.MethodOverride

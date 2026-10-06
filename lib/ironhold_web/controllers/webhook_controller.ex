@@ -4,6 +4,8 @@ defmodule IronholdWeb.WebhookController do
   alias Ironhold.Webhooks
   alias IronholdWeb.Telemetry
 
+  plug IronholdWeb.Plugs.RequireMatchingWebhookId when action == :create
+
   @invalid_webhook_message "id, type, and data must be provided in the expected format"
   @duplicate_webhook_message "a webhook with this id has already been received"
 
