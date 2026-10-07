@@ -4,9 +4,11 @@ Ironhold is the companion service to Tidewake. Tidewake focuses on reliable webh
 
 ## Current status
 
-This repository contains the project foundation and a webhook ingestion endpoint that persists received event envelopes. The endpoint requires a single `application/json` content type, rejects unsupported or ambiguous media types, limits the raw request body to `262_144` bytes, and returns a stable error when that limit is exceeded. Persisted event IDs and types are limited to 255 characters, and ingestion emits Telemetry for accepted requests and bounded rejection reasons.
+This repository contains the project foundation and an authenticated webhook ingestion endpoint that persists received event envelopes. The endpoint requires a single `application/json` content type, rejects unsupported or ambiguous media types, limits the raw request body to `262_144` bytes, and returns stable errors for those boundaries. Persisted event IDs and types are limited to 255 characters.
 
-[ADR 0003](docs/adr/0003-signed-webhook-verification.md) defines the future HMAC verification contract; it does not implement it. Signature verification, temporal validation, raw-body preservation for HMAC, replay protection, secret rotation, rate limiting, authentication, complete auditing, and an operational dashboard are not implemented yet.
+`POST /api/webhooks` requires exactly one `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` header. Ironhold verifies HMAC-SHA256 over `v1.<event_id>.<timestamp>.<exact_body_bytes>` before JSON decoding, accepts timestamps from 300 seconds in the past through 30 seconds in the future, and requires the authenticated header ID to match the decoded body ID exactly. Authentication failures return the generic `401` response defined by [ADR 0004](docs/adr/0004-webhook-authentication-policy.md). Production reads the shared secret from `IRONHOLD_WEBHOOK_SIGNING_SECRET`.
+
+Ingestion and authentication emit separate low-cardinality Telemetry events and counters. Replay protection, storage of used nonces or signatures, secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, and an operational dashboard remain unimplemented. This receiver boundary is not an end-to-end production integration: Tidewake's Req adapter remains inactive, so real HTTP delivery, retries, backoff, and Tidewake-side SSRF protection are still pending.
 
 ## Stack
 
@@ -68,7 +70,7 @@ mix test
 
 ## Roadmap
 
-The next increments will define webhook ingestion contracts, add integrity and replay protections, introduce operational controls and audit retention, and only then consider an authenticated dashboard. See [docs/roadmap.md](docs/roadmap.md) for the staged plan.
+The next increments will add replay protection, operational controls, and audit retention before an authenticated dashboard is considered. See [docs/roadmap.md](docs/roadmap.md) for the staged plan.
 
 The initial HTTP contract is documented in [docs/api/webhooks.md](docs/api/webhooks.md).
 
