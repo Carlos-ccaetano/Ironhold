@@ -22,13 +22,18 @@ The roadmap is incremental so that protocol and security decisions remain review
 - accepted ingestion and bounded rejection reasons emit Telemetry
 - context, schema, route, contract, and failure-path tests cover the implemented boundary
 
-This endpoint stores envelopes but does not establish their authenticity or freshness.
+These persistence and HTTP boundaries are now combined with the authenticated boundary below.
 
-## 3. Integrity and freshness
+## 3. Authenticated webhook ingestion — implemented first boundary
 
-- The versioned HMAC receiver contract is defined in ADR 0003; verification is not implemented
-- Add raw-body preservation and HMAC verification with secret-rotation guidance
-- Add temporal validation and replay protections backed by explicit threat-model tests
+- exactly one `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` header is required
+- HMAC-SHA256 is verified over `v1.<event_id>.<timestamp>.<exact_body_bytes>` before JSON decoding
+- the timestamp window includes 300 seconds in the past and 30 seconds in the future
+- the authenticated header ID must match the decoded body `id` exactly
+- authentication failures return the generic `401` response from ADR 0004 before persistence
+- production requires `IRONHOLD_WEBHOOK_SIGNING_SECRET` with at least 32 bytes
+- verified signatures, authentication rejections, and identifier mismatches emit separate low-cardinality Telemetry events and counters
+- replay protection, used-nonce or signature storage, and secret rotation or multiple simultaneous secrets remain pending
 
 ## 4. Operational protection and audit
 
@@ -41,4 +46,6 @@ This endpoint stores envelopes but does not establish their authenticity or fres
 - Add authentication and authorization
 - Consider an operational dashboard only after its concrete user needs and access model are known
 
-The project foundation, initial webhook ingestion, HTTP boundaries, field limits, and ingestion Telemetry are implemented. HMAC verification, temporal validation, raw-body preservation for HMAC, replay protection, secret rotation, rate limiting, complete auditing, and the operational dashboard remain planned work.
+The project foundation, authenticated webhook ingestion, HTTP boundaries, field limits, and ingestion and authentication Telemetry are implemented. Replay protection, used-nonce or signature storage, secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, and the operational dashboard remain planned work.
+
+End-to-end production delivery is not complete. Tidewake's Req adapter remains inactive, so real HTTP delivery, retries, backoff, and Tidewake-side SSRF protection remain pending.
