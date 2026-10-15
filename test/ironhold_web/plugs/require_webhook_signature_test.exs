@@ -9,6 +9,8 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignatureTest do
   @secret "tidewake_test_secret_not_for_production"
   @authenticated_body_private_key :ironhold_authenticated_webhook_body
   @authenticated_id_private_key :ironhold_authenticated_webhook_id
+  @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
+  @replay_metadata_private_key :ironhold_authenticated_webhook_replay
   @verified_event [:ironhold, :webhooks, :authentication, :verified]
   @rejected_event [:ironhold, :webhooks, :authentication, :rejected]
   @invalid_signature_response ~s({"errors":[{"detail":"valid webhook signature required"}]})
@@ -131,14 +133,20 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignatureTest do
     assert_authentication_failure(signed_conn("{}"))
   end
 
-  test "preserves the exact body and verified ID in conn.private" do
+  test "preserves only the transient values needed for final authentication" do
     body = "{\r\n  \"type\": \"test.ping\", \"id\": \"evt_test_123\", \"data\": {}\n}"
-    conn = signed_conn(body)
+    timestamp = current_timestamp()
+    conn = signed_conn(body, timestamp: timestamp)
 
     returned_conn = RequireWebhookSignature.call(conn, @opts)
 
     assert returned_conn.private[@authenticated_body_private_key] === body
     assert returned_conn.private[@authenticated_id_private_key] == "evt_test_123"
+
+    assert returned_conn.private[@authenticated_signed_at_private_key] ==
+             String.to_integer(timestamp)
+
+    refute Map.has_key?(returned_conn.private, @replay_metadata_private_key)
   end
 
   test "uses the same generic response for different authentication failures" do
@@ -205,6 +213,8 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignatureTest do
     assert returned_conn.status == 401
     assert returned_conn.resp_body == @invalid_signature_response
     assert get_resp_header(returned_conn, "content-type") == ["application/json; charset=utf-8"]
+    refute Map.has_key?(returned_conn.private, @authenticated_signed_at_private_key)
+    refute Map.has_key?(returned_conn.private, @replay_metadata_private_key)
   end
 
   defp response_identity(conn) do

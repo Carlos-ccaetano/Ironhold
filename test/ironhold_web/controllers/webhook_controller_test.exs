@@ -4,11 +4,14 @@ defmodule IronholdWeb.WebhookControllerTest do
   import ExUnit.CaptureLog
 
   alias Ironhold.Repo
-  alias Ironhold.Webhooks.ReceivedWebhook
+  alias Ironhold.Webhooks.{ReceivedWebhook, ReplayFingerprint}
 
+  @authenticated_body_private_key :ironhold_authenticated_webhook_body
+  @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
   @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
   @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
   @max_body_size 262_144
+  @replay_metadata_private_key :ironhold_authenticated_webhook_replay
   @signing_secret "tidewake_test_secret_not_for_production"
   @invalid_signature_response %{
     "errors" => [%{"detail" => "valid webhook signature required"}]
@@ -51,6 +54,25 @@ defmodule IronholdWeb.WebhookControllerTest do
                "status" => "accepted"
              }
            }
+  end
+
+  test "POST /api/webhooks exposes only safe replay metadata after authentication", %{conn: conn} do
+    body = Jason.encode!(%{@valid_webhook | id: "evt_replay_metadata"})
+    timestamp = current_timestamp()
+
+    conn = post_signed(conn, body, timestamp: timestamp)
+
+    assert conn.private[@replay_metadata_private_key] == %{
+             fingerprint: replay_fingerprint("evt_replay_metadata", timestamp, body),
+             expires_at:
+               timestamp
+               |> String.to_integer()
+               |> Kernel.+(300)
+               |> DateTime.from_unix!()
+           }
+
+    refute Map.has_key?(conn.private, @authenticated_body_private_key)
+    refute Map.has_key?(conn.private, @authenticated_signed_at_private_key)
   end
 
   test "POST /api/webhooks rejects a request without signing headers", %{conn: conn} do
@@ -394,6 +416,7 @@ defmodule IronholdWeb.WebhookControllerTest do
     assert conn.halted
     assert json_response(conn, 401) == @invalid_signature_response
     assert Repo.aggregate(ReceivedWebhook, :count) == 0
+    refute Map.has_key?(conn.private, @replay_metadata_private_key)
   end
 
   defp assert_unsupported_media_type(conn) do
@@ -421,6 +444,12 @@ defmodule IronholdWeb.WebhookControllerTest do
     |> then(&:crypto.mac(:hmac, :sha256, @signing_secret, &1))
     |> Base.encode16(case: :lower)
     |> then(&("v1=" <> &1))
+  end
+
+  defp replay_fingerprint(header_id, timestamp, body) do
+    header_id
+    |> signature(timestamp, body)
+    |> ReplayFingerprint.derive()
   end
 
   defp attach_ingestion_events(event_id \\ nil) do

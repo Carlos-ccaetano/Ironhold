@@ -15,6 +15,7 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
   @maximum_body_size 262_144
   @authenticated_body_private_key :ironhold_authenticated_webhook_body
   @authenticated_id_private_key :ironhold_authenticated_webhook_id
+  @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
   @required_headers ["tidewake-id", "tidewake-timestamp", "tidewake-signature"]
 
   @impl Plug
@@ -25,7 +26,7 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
     with {:ok, [header_id, timestamp, signature]} <- required_headers(conn),
          {:ok, body, conn} <- read_bounded_body(conn),
          {:ok, secret} <- Application.fetch_env(:ironhold, :webhook_signing_secret),
-         {:ok, verified_id} <-
+         {:ok, %{event_id: verified_id, signed_at: signed_at}} <-
            Signature.verify(
              header_id,
              timestamp,
@@ -39,6 +40,7 @@ defmodule IronholdWeb.Plugs.RequireWebhookSignature do
       conn
       |> put_private(@authenticated_body_private_key, body)
       |> put_private(@authenticated_id_private_key, verified_id)
+      |> put_private(@authenticated_signed_at_private_key, signed_at)
     else
       {:error, :payload_too_large, conn} -> payload_too_large(conn)
       _authentication_failure -> reject(conn)
