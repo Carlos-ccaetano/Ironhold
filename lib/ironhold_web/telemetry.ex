@@ -5,6 +5,7 @@ defmodule IronholdWeb.Telemetry do
   import Telemetry.Metrics
 
   @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
+  @idempotent_retry_event [:ironhold, :webhooks, :ingestion, :idempotent_retry]
   @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
   @replay_claim_accepted_event [:ironhold, :webhooks, :replay, :claim_accepted]
   @replay_detected_event [:ironhold, :webhooks, :replay, :detected]
@@ -30,6 +31,10 @@ defmodule IronholdWeb.Telemetry do
 
   def emit_ingestion_accepted do
     :telemetry.execute(@accepted_event, %{count: 1}, %{})
+  end
+
+  def emit_idempotent_retry do
+    :telemetry.execute(@idempotent_retry_event, %{count: 1}, %{})
   end
 
   def emit_ingestion_rejected(reason) when reason in @rejection_reasons do
@@ -78,6 +83,7 @@ defmodule IronholdWeb.Telemetry do
   def metrics do
     [
       counter("ironhold.webhooks.ingestion.accepted.count"),
+      counter("ironhold.webhooks.ingestion.idempotent_retry.count"),
       counter("ironhold.webhooks.ingestion.rejected.count", tags: [:reason]),
       counter("ironhold.webhooks.replay.claim_accepted.count"),
       counter("ironhold.webhooks.replay.detected.count"),
