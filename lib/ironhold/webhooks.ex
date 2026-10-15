@@ -32,9 +32,40 @@ defmodule Ironhold.Webhooks do
 
     Multi.new()
     |> Multi.insert(:replay_claim, replay_claim_changeset)
-    |> Multi.insert(:webhook, webhook_changeset)
+    |> Multi.run(:webhook, fn repo, _changes ->
+      insert_or_acknowledge_webhook(repo, webhook_changeset)
+    end)
     |> Repo.transaction()
     |> normalize_ingestion_result()
+  end
+
+  defp insert_or_acknowledge_webhook(repo, changeset) do
+    case repo.insert(changeset, on_conflict: :nothing, conflict_target: [:event_id]) do
+      {:ok, %ReceivedWebhook{id: nil} = webhook} -> acknowledge_existing_webhook(repo, webhook)
+      result -> result
+    end
+  end
+
+  defp acknowledge_existing_webhook(repo, webhook) do
+    persisted_webhook =
+      repo.one(
+        from persisted in ReceivedWebhook,
+          where: persisted.event_id == ^webhook.event_id,
+          lock: "FOR UPDATE"
+      )
+
+    case persisted_webhook do
+      %ReceivedWebhook{} = persisted -> compare_webhook_envelope(persisted, webhook)
+      nil -> {:error, :invalid_webhook}
+    end
+  end
+
+  defp compare_webhook_envelope(persisted, candidate) do
+    if persisted.event_type == candidate.event_type and persisted.payload == candidate.payload do
+      {:ok, persisted}
+    else
+      {:error, :duplicate_event}
+    end
   end
 
   def prune_expired_replay_claims(reference_time) do
@@ -72,6 +103,10 @@ defmodule Ironhold.Webhooks do
     else
       {:error, :invalid_replay_claim}
     end
+  end
+
+  defp normalize_ingestion_result({:error, :webhook, :duplicate_event, _changes}) do
+    {:error, :duplicate_event}
   end
 
   defp normalize_ingestion_result({:error, :webhook, %Ecto.Changeset{} = changeset, _changes}) do

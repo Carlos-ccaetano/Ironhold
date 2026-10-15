@@ -133,23 +133,63 @@ defmodule Ironhold.WebhooksTest do
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
 
-    test "classifies the same event with a different fingerprint as a duplicate" do
+    test "acknowledges an identical envelope with a different fingerprint" do
       attach_replay_events()
 
-      assert {:ok, _webhook} =
+      assert {:ok, original_webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
       assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
       assert metadata == %{}
 
-      assert {:error, :duplicate_event} =
+      assert {:ok, retried_webhook} =
                Webhooks.ingest_authenticated_webhook(
                  @valid_attrs,
                  @other_fingerprint,
                  @expires_at
                )
 
+      assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
+      assert metadata == %{}
       refute_receive {:replay_event, _, _, _}
+      assert retried_webhook.id == original_webhook.id
+      assert retried_webhook.event_id == original_webhook.event_id
+      assert retried_webhook.event_type == original_webhook.event_type
+      assert retried_webhook.payload == original_webhook.payload
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 2
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    end
+
+    test "rejects the same event_id with a different event_type" do
+      assert {:ok, _webhook} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      conflicting_attrs = Map.put(@valid_attrs, :event_type, "order.updated")
+
+      assert {:error, :duplicate_event} =
+               Webhooks.ingest_authenticated_webhook(
+                 conflicting_attrs,
+                 @other_fingerprint,
+                 @expires_at
+               )
+
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    end
+
+    test "rejects the same event_id with a different payload" do
+      assert {:ok, _webhook} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      conflicting_attrs = Map.put(@valid_attrs, :payload, %{"order_id" => "456"})
+
+      assert {:error, :duplicate_event} =
+               Webhooks.ingest_authenticated_webhook(
+                 conflicting_attrs,
+                 @other_fingerprint,
+                 @expires_at
+               )
+
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
