@@ -6,9 +6,13 @@ defmodule IronholdWeb.Telemetry do
 
   @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
   @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
+  @replay_claim_accepted_event [:ironhold, :webhooks, :replay, :claim_accepted]
+  @replay_detected_event [:ironhold, :webhooks, :replay, :detected]
+  @replay_cleanup_completed_event [:ironhold, :webhooks, :replay, :cleanup_completed]
   @authentication_verified_event [:ironhold, :webhooks, :authentication, :verified]
   @authentication_rejected_event [:ironhold, :webhooks, :authentication, :rejected]
   @identifier_mismatch_event [:ironhold, :webhooks, :authentication, :identifier_mismatch]
+  @cleanup_origins [:manual, :scheduled]
   @rejection_reasons [:validation, :replay_detected, :duplicate_event, :unsupported_media_type]
 
   def start_link(arg) do
@@ -32,6 +36,33 @@ defmodule IronholdWeb.Telemetry do
     :telemetry.execute(@rejected_event, %{count: 1}, %{reason: reason})
   end
 
+  def emit_replay_claim_accepted do
+    :telemetry.execute(@replay_claim_accepted_event, %{count: 1}, %{})
+  end
+
+  def emit_replay_detected do
+    :telemetry.execute(@replay_detected_event, %{count: 1}, %{})
+  end
+
+  def emit_replay_cleanup_completed({:ok, claims_removed}, duration, origin)
+      when is_integer(claims_removed) and claims_removed >= 0 and is_integer(duration) and
+             duration >= 0 and origin in @cleanup_origins do
+    :telemetry.execute(
+      @replay_cleanup_completed_event,
+      %{count: 1, claims_removed: claims_removed, duration: duration},
+      %{result: :ok, origin: origin}
+    )
+  end
+
+  def emit_replay_cleanup_completed({:error, :cleanup_failed}, duration, origin)
+      when is_integer(duration) and duration >= 0 and origin in @cleanup_origins do
+    :telemetry.execute(
+      @replay_cleanup_completed_event,
+      %{count: 1, duration: duration},
+      %{result: :error, origin: origin}
+    )
+  end
+
   def emit_authentication_verified do
     :telemetry.execute(@authentication_verified_event, %{count: 1}, %{})
   end
@@ -48,6 +79,17 @@ defmodule IronholdWeb.Telemetry do
     [
       counter("ironhold.webhooks.ingestion.accepted.count"),
       counter("ironhold.webhooks.ingestion.rejected.count", tags: [:reason]),
+      counter("ironhold.webhooks.replay.claim_accepted.count"),
+      counter("ironhold.webhooks.replay.detected.count"),
+      counter("ironhold.webhooks.replay.cleanup_completed.count", tags: [:result, :origin]),
+      sum("ironhold.webhooks.replay.cleanup_completed.claims_removed",
+        tags: [:result, :origin],
+        keep: &match?(%{result: :ok}, &1)
+      ),
+      summary("ironhold.webhooks.replay.cleanup_completed.duration",
+        tags: [:result, :origin],
+        unit: {:native, :millisecond}
+      ),
       counter("ironhold.webhooks.authentication.verified.count"),
       counter("ironhold.webhooks.authentication.rejected.count"),
       counter("ironhold.webhooks.authentication.identifier_mismatch.count"),

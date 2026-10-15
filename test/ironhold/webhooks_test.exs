@@ -8,6 +8,8 @@ defmodule Ironhold.WebhooksTest do
   @fingerprint String.duplicate("a", 64)
   @other_fingerprint String.duplicate("b", 64)
   @received_at ~U[2026-08-11 12:00:00.000000Z]
+  @replay_claim_accepted_event [:ironhold, :webhooks, :replay, :claim_accepted]
+  @replay_detected_event [:ironhold, :webhooks, :replay, :detected]
   @valid_attrs %{
     event_id: "evt_123",
     event_type: "order.created",
@@ -97,28 +99,48 @@ defmodule Ironhold.WebhooksTest do
 
   describe "ingest_authenticated_webhook/3" do
     test "persists the replay claim and webhook together" do
+      attach_replay_events()
+
       assert {:ok, webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
+      assert_receive {:replay_event, @replay_claim_accepted_event, measurements, metadata}
+      assert measurements == %{count: 1}
+      assert metadata == %{}
+      refute_receive {:replay_event, _, _, _}
       assert webhook.event_id == "evt_123"
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
 
     test "classifies a repeated fingerprint as replay without exposing a changeset" do
+      attach_replay_events()
+
       assert {:ok, _webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
+      assert metadata == %{}
 
       assert {:error, :replay_detected} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
+      assert_receive {:replay_event, @replay_detected_event, measurements, metadata}
+      assert measurements == %{count: 1}
+      assert metadata == %{}
+      refute_receive {:replay_event, _, _, _}
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
 
     test "classifies the same event with a different fingerprint as a duplicate" do
+      attach_replay_events()
+
       assert {:ok, _webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
+      assert metadata == %{}
 
       assert {:error, :duplicate_event} =
                Webhooks.ingest_authenticated_webhook(
@@ -127,16 +149,19 @@ defmodule Ironhold.WebhooksTest do
                  @expires_at
                )
 
+      refute_receive {:replay_event, _, _, _}
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
 
     test "rolls back the replay claim when the webhook is invalid" do
+      attach_replay_events()
       invalid_attrs = Map.delete(@valid_attrs, :event_type)
 
       assert {:error, :invalid_webhook} =
                Webhooks.ingest_authenticated_webhook(invalid_attrs, @fingerprint, @expires_at)
 
+      refute_receive {:replay_event, _, _, _}
       assert Repo.aggregate(WebhookReplayClaim, :count) == 0
       assert Repo.aggregate(ReceivedWebhook, :count) == 0
     end
@@ -179,5 +204,22 @@ defmodule Ironhold.WebhooksTest do
     %WebhookReplayClaim{}
     |> WebhookReplayClaim.changeset(%{fingerprint: fingerprint, expires_at: expires_at})
     |> Repo.insert!()
+  end
+
+  defp attach_replay_events do
+    handler_id = {__MODULE__, self(), make_ref()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [@replay_claim_accepted_event, @replay_detected_event],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:replay_event, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 end
