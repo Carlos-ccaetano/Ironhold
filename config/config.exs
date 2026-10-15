@@ -3,6 +3,8 @@ import Config
 config :ironhold,
   ecto_repos: [Ironhold.Repo]
 
+config :ironhold, Ironhold.Webhooks.ReplayCleanup, interval: :timer.minutes(5)
+
 config :ironhold, IronholdWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

@@ -8,6 +8,7 @@ defmodule Ironhold.Application do
     children = [
       IronholdWeb.Telemetry,
       Ironhold.Repo,
+      Ironhold.Webhooks.ReplayCleanup,
       IronholdWeb.Endpoint
     ]
 
