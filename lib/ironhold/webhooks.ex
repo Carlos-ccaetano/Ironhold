@@ -42,6 +42,7 @@ defmodule Ironhold.Webhooks do
   defp insert_or_acknowledge_webhook(repo, changeset) do
     case repo.insert(changeset, on_conflict: :nothing, conflict_target: [:event_id]) do
       {:ok, %ReceivedWebhook{id: nil} = webhook} -> acknowledge_existing_webhook(repo, webhook)
+      {:ok, %ReceivedWebhook{} = webhook} -> {:ok, {:inserted, webhook}}
       result -> result
     end
   end
@@ -62,7 +63,7 @@ defmodule Ironhold.Webhooks do
 
   defp compare_webhook_envelope(persisted, candidate) do
     if persisted.event_type == candidate.event_type and persisted.payload == candidate.payload do
-      {:ok, persisted}
+      {:ok, {:idempotent_retry, persisted}}
     else
       {:error, :duplicate_event}
     end
@@ -89,8 +90,14 @@ defmodule Ironhold.Webhooks do
 
   defp normalize_insert_result(result), do: result
 
-  defp normalize_ingestion_result({:ok, %{webhook: webhook}}) do
+  defp normalize_ingestion_result({:ok, %{webhook: {:inserted, webhook}}}) do
     Telemetry.emit_replay_claim_accepted()
+    {:ok, webhook}
+  end
+
+  defp normalize_ingestion_result({:ok, %{webhook: {:idempotent_retry, webhook}}}) do
+    Telemetry.emit_replay_claim_accepted()
+    Telemetry.emit_idempotent_retry()
     {:ok, webhook}
   end
 

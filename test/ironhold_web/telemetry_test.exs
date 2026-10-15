@@ -18,6 +18,12 @@ defmodule IronholdWeb.TelemetryTest do
              measurement: :count,
              tags: [:reason]
            } = metric(metrics, [:ironhold, :webhooks, :ingestion, :rejected, :count])
+
+    assert %Counter{
+             event_name: [:ironhold, :webhooks, :ingestion, :idempotent_retry],
+             measurement: :count,
+             tags: []
+           } = metric(metrics, [:ironhold, :webhooks, :ingestion, :idempotent_retry, :count])
   end
 
   test "declares untagged authentication counters" do

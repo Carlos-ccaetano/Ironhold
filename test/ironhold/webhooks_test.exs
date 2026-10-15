@@ -8,6 +8,7 @@ defmodule Ironhold.WebhooksTest do
   @fingerprint String.duplicate("a", 64)
   @other_fingerprint String.duplicate("b", 64)
   @received_at ~U[2026-08-11 12:00:00.000000Z]
+  @idempotent_retry_event [:ironhold, :webhooks, :ingestion, :idempotent_retry]
   @replay_claim_accepted_event [:ironhold, :webhooks, :replay, :claim_accepted]
   @replay_detected_event [:ironhold, :webhooks, :replay, :detected]
   @valid_attrs %{
@@ -100,6 +101,7 @@ defmodule Ironhold.WebhooksTest do
   describe "ingest_authenticated_webhook/3" do
     test "persists the replay claim and webhook together" do
       attach_replay_events()
+      attach_idempotent_retry_event()
 
       assert {:ok, webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
@@ -108,6 +110,7 @@ defmodule Ironhold.WebhooksTest do
       assert measurements == %{count: 1}
       assert metadata == %{}
       refute_receive {:replay_event, _, _, _}
+      refute_receive {:idempotent_retry_event, _, _, _}
       assert webhook.event_id == "evt_123"
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
@@ -122,6 +125,8 @@ defmodule Ironhold.WebhooksTest do
       assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
       assert metadata == %{}
 
+      attach_idempotent_retry_event()
+
       assert {:error, :replay_detected} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
@@ -129,6 +134,7 @@ defmodule Ironhold.WebhooksTest do
       assert measurements == %{count: 1}
       assert metadata == %{}
       refute_receive {:replay_event, _, _, _}
+      refute_receive {:idempotent_retry_event, _, _, _}
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
     end
@@ -142,6 +148,8 @@ defmodule Ironhold.WebhooksTest do
       assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
       assert metadata == %{}
 
+      attach_idempotent_retry_event()
+
       assert {:ok, retried_webhook} =
                Webhooks.ingest_authenticated_webhook(
                  @valid_attrs,
@@ -151,7 +159,9 @@ defmodule Ironhold.WebhooksTest do
 
       assert_receive {:replay_event, @replay_claim_accepted_event, %{count: 1}, metadata}
       assert metadata == %{}
+      assert_receive {:idempotent_retry_event, %{count: 1}, %{}, true}
       refute_receive {:replay_event, _, _, _}
+      refute_receive {:idempotent_retry_event, _, _, _}
       assert retried_webhook.id == original_webhook.id
       assert retried_webhook.event_id == original_webhook.event_id
       assert retried_webhook.event_type == original_webhook.event_type
@@ -164,6 +174,7 @@ defmodule Ironhold.WebhooksTest do
       assert {:ok, _webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
+      attach_idempotent_retry_event()
       conflicting_attrs = Map.put(@valid_attrs, :event_type, "order.updated")
 
       assert {:error, :duplicate_event} =
@@ -175,12 +186,14 @@ defmodule Ironhold.WebhooksTest do
 
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      refute_receive {:idempotent_retry_event, _, _, _}
     end
 
     test "rejects the same event_id with a different payload" do
       assert {:ok, _webhook} =
                Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
 
+      attach_idempotent_retry_event()
       conflicting_attrs = Map.put(@valid_attrs, :payload, %{"order_id" => "456"})
 
       assert {:error, :duplicate_event} =
@@ -192,16 +205,19 @@ defmodule Ironhold.WebhooksTest do
 
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      refute_receive {:idempotent_retry_event, _, _, _}
     end
 
     test "rolls back the replay claim when the webhook is invalid" do
       attach_replay_events()
+      attach_idempotent_retry_event()
       invalid_attrs = Map.delete(@valid_attrs, :event_type)
 
       assert {:error, :invalid_webhook} =
                Webhooks.ingest_authenticated_webhook(invalid_attrs, @fingerprint, @expires_at)
 
       refute_receive {:replay_event, _, _, _}
+      refute_receive {:idempotent_retry_event, _, _, _}
       assert Repo.aggregate(WebhookReplayClaim, :count) == 0
       assert Repo.aggregate(ReceivedWebhook, :count) == 0
     end
@@ -256,6 +272,30 @@ defmodule Ironhold.WebhooksTest do
         [@replay_claim_accepted_event, @replay_detected_event],
         fn event, measurements, metadata, _config ->
           send(test_pid, {:replay_event, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp attach_idempotent_retry_event do
+    handler_id = {__MODULE__, self(), make_ref()}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @idempotent_retry_event,
+        fn _event, measurements, metadata, _config ->
+          persistence_visible =
+            Repo.aggregate(WebhookReplayClaim, :count) == 2 and
+              Repo.aggregate(ReceivedWebhook, :count) == 1
+
+          send(
+            test_pid,
+            {:idempotent_retry_event, measurements, metadata, persistence_visible}
+          )
         end,
         nil
       )
