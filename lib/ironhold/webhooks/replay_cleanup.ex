@@ -8,6 +8,7 @@ defmodule Ironhold.Webhooks.ReplayCleanup do
   require Logger
 
   alias Ironhold.Webhooks
+  alias IronholdWeb.Telemetry
 
   @cleanup_message :prune_expired_replay_claims
 
@@ -43,12 +44,12 @@ defmodule Ironhold.Webhooks.ReplayCleanup do
 
   @impl true
   def handle_call({:run, reference_time}, _from, interval) do
-    {:reply, prune(reference_time), interval}
+    {:reply, prune(reference_time, :manual), interval}
   end
 
   @impl true
   def handle_info(@cleanup_message, interval) do
-    _result = prune(DateTime.utc_now())
+    _result = prune(DateTime.utc_now(), :scheduled)
     schedule_next(interval)
 
     {:noreply, interval}
@@ -61,7 +62,16 @@ defmodule Ironhold.Webhooks.ReplayCleanup do
     :ok
   end
 
-  defp prune(reference_time) do
+  defp prune(reference_time, origin) do
+    started_at = System.monotonic_time()
+    result = do_prune(reference_time)
+    duration = System.monotonic_time() - started_at
+
+    Telemetry.emit_replay_cleanup_completed(result, duration, origin)
+    result
+  end
+
+  defp do_prune(reference_time) do
     {:ok, Webhooks.prune_expired_replay_claims(reference_time)}
   rescue
     _exception ->

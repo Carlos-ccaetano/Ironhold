@@ -8,6 +8,7 @@ defmodule Ironhold.Webhooks do
   alias Ecto.Multi
   alias Ironhold.Repo
   alias Ironhold.Webhooks.{ReceivedWebhook, WebhookReplayClaim}
+  alias IronholdWeb.Telemetry
 
   @event_id_constraint "received_webhooks_event_id_index"
   @fingerprint_constraint "webhook_replay_claims_fingerprint_index"
@@ -57,12 +58,16 @@ defmodule Ironhold.Webhooks do
 
   defp normalize_insert_result(result), do: result
 
-  defp normalize_ingestion_result({:ok, %{webhook: webhook}}), do: {:ok, webhook}
+  defp normalize_ingestion_result({:ok, %{webhook: webhook}}) do
+    Telemetry.emit_replay_claim_accepted()
+    {:ok, webhook}
+  end
 
   defp normalize_ingestion_result(
          {:error, :replay_claim, %Ecto.Changeset{} = changeset, _changes}
        ) do
     if constraint_error?(changeset, :fingerprint, :unique, @fingerprint_constraint) do
+      Telemetry.emit_replay_detected()
       {:error, :replay_detected}
     else
       {:error, :invalid_replay_claim}
