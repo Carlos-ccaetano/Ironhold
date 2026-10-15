@@ -346,7 +346,9 @@ defmodule IronholdWeb.WebhookControllerTest do
       assert Repo.get_by(WebhookReplayClaim, fingerprint: fingerprint)
     end
 
-    test "treats a freshly signed request for the same event as a duplicate event", %{conn: conn} do
+    test "acknowledges a freshly signed identical retry and rejects its exact replay", %{
+      conn: conn
+    } do
       body = Jason.encode!(@valid_webhook)
       first_timestamp = current_timestamp()
       second_timestamp = shift_timestamp(first_timestamp, 1)
@@ -357,68 +359,69 @@ defmodule IronholdWeb.WebhookControllerTest do
 
       refute first_signature == second_signature
 
-      assert_accepted_response(
-        post_signed(conn, body, timestamp: first_timestamp, signature: first_signature),
-        "evt_123"
-      )
+      first_conn =
+        post_signed(conn, body, timestamp: first_timestamp, signature: first_signature)
 
-      attach_ingestion_events()
+      assert_accepted_response(first_conn, "evt_123")
+      first_response = json_response(first_conn, 202)
 
-      duplicate_conn =
+      attach_ingestion_events("evt_123")
+
+      retry_conn =
         post_signed(build_conn(), body,
           timestamp: second_timestamp,
           signature: second_signature
         )
 
-      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
+      assert_receive {:ingestion_event, @accepted_event, %{count: 1}, %{}, true}
+      refute_receive {:ingestion_event, _, _, _, _}
+
+      assert json_response(retry_conn, 202) == first_response
+
+      refute_sensitive_response_details(retry_conn, [
+        second_signature,
+        second_fingerprint,
+        second_timestamp
+      ])
+
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 2
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
+
+      replay_conn =
+        post_signed(build_conn(), body,
+          timestamp: second_timestamp,
+          signature: second_signature
+        )
+
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :replay_detected},
                       false}
 
       refute_receive {:ingestion_event, _, _, _, _}
 
-      assert_conflict_response(duplicate_conn, [second_signature, second_fingerprint])
+      assert_conflict_response(replay_conn, [
+        second_signature,
+        second_fingerprint,
+        second_timestamp
+      ])
+
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
-      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
-      assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
-      refute Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 2
     end
 
     test "rejects a changed payload with a new signature through event id idempotency", %{
       conn: conn
     } do
-      first_body = Jason.encode!(@valid_webhook)
-      changed_body = Jason.encode!(put_in(@valid_webhook, [:data, :status], "updated"))
-      first_timestamp = current_timestamp()
-      second_timestamp = shift_timestamp(first_timestamp, 1)
-      first_signature = signature("evt_123", first_timestamp, first_body)
-      second_signature = signature("evt_123", second_timestamp, changed_body)
-      first_fingerprint = ReplayFingerprint.derive(first_signature)
-      second_fingerprint = ReplayFingerprint.derive(second_signature)
+      changed_webhook = put_in(@valid_webhook, [:data, :status], "updated")
 
-      refute first_signature == second_signature
+      assert_conflicting_retry_rejected(conn, changed_webhook)
+    end
 
-      assert_accepted_response(
-        post_signed(conn, first_body, timestamp: first_timestamp, signature: first_signature),
-        "evt_123"
-      )
-
-      attach_ingestion_events()
-
-      duplicate_conn =
-        post_signed(build_conn(), changed_body,
-          timestamp: second_timestamp,
-          signature: second_signature
-        )
-
-      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
-                      false}
-
-      refute_receive {:ingestion_event, _, _, _, _}
-
-      assert_conflict_response(duplicate_conn, [second_signature, second_fingerprint])
-      assert Repo.aggregate(ReceivedWebhook, :count) == 1
-      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
-      assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
-      refute Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
+    test "rejects a changed event type with a new signature through event id idempotency", %{
+      conn: conn
+    } do
+      assert_conflicting_retry_rejected(conn, %{@valid_webhook | type: "order.updated"})
     end
 
     test "rejects an invalid signature before creating replay state", %{conn: conn} do
@@ -535,12 +538,56 @@ defmodule IronholdWeb.WebhookControllerTest do
   defp assert_conflict_response(conn, sensitive_values) do
     assert json_response(conn, 409) == @conflict_response
 
+    refute_sensitive_response_details(conn, sensitive_values)
+  end
+
+  defp refute_sensitive_response_details(conn, sensitive_values) do
     Enum.each(sensitive_values, &refute(conn.resp_body =~ &1))
 
     Enum.each(
       ["fingerprint", "signature", "replay_detected", "duplicate_event", "constraint"],
       &refute(conn.resp_body =~ &1)
     )
+  end
+
+  defp assert_conflicting_retry_rejected(conn, changed_webhook) do
+    first_body = Jason.encode!(@valid_webhook)
+    changed_body = Jason.encode!(changed_webhook)
+    first_timestamp = current_timestamp()
+    second_timestamp = shift_timestamp(first_timestamp, 1)
+    first_signature = signature("evt_123", first_timestamp, first_body)
+    second_signature = signature("evt_123", second_timestamp, changed_body)
+    first_fingerprint = ReplayFingerprint.derive(first_signature)
+    second_fingerprint = ReplayFingerprint.derive(second_signature)
+
+    assert_accepted_response(
+      post_signed(conn, first_body, timestamp: first_timestamp, signature: first_signature),
+      "evt_123"
+    )
+
+    attach_ingestion_events()
+
+    duplicate_conn =
+      post_signed(build_conn(), changed_body,
+        timestamp: second_timestamp,
+        signature: second_signature
+      )
+
+    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
+                    false}
+
+    refute_receive {:ingestion_event, _, _, _, _}
+
+    assert_conflict_response(duplicate_conn, [
+      second_signature,
+      second_fingerprint,
+      second_timestamp
+    ])
+
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+    assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
+    refute Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
   end
 
   defp accept_json(conn), do: put_req_header(conn, "accept", "application/json")
