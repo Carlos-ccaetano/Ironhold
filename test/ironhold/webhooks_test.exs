@@ -2,8 +2,11 @@ defmodule Ironhold.WebhooksTest do
   use Ironhold.DataCase, async: true
 
   alias Ironhold.Webhooks
-  alias Ironhold.Webhooks.ReceivedWebhook
+  alias Ironhold.Webhooks.{ReceivedWebhook, WebhookReplayClaim}
 
+  @expires_at ~U[2026-08-11 12:05:00.000000Z]
+  @fingerprint String.duplicate("a", 64)
+  @other_fingerprint String.duplicate("b", 64)
   @received_at ~U[2026-08-11 12:00:00.000000Z]
   @valid_attrs %{
     event_id: "evt_123",
@@ -88,6 +91,53 @@ defmodule Ironhold.WebhooksTest do
       assert {:error, changeset} = Webhooks.receive_webhook(attrs, @received_at)
       assert Map.has_key?(errors_on(changeset), :event_id)
       assert Map.has_key?(errors_on(changeset), :event_type)
+      assert Repo.aggregate(ReceivedWebhook, :count) == 0
+    end
+  end
+
+  describe "ingest_authenticated_webhook/3" do
+    test "persists the replay claim and webhook together" do
+      assert {:ok, webhook} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert webhook.event_id == "evt_123"
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    end
+
+    test "classifies a repeated fingerprint as replay without exposing a changeset" do
+      assert {:ok, _webhook} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert {:error, :replay_detected} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    end
+
+    test "classifies the same event with a different fingerprint as a duplicate" do
+      assert {:ok, _webhook} =
+               Webhooks.ingest_authenticated_webhook(@valid_attrs, @fingerprint, @expires_at)
+
+      assert {:error, :duplicate_event} =
+               Webhooks.ingest_authenticated_webhook(
+                 @valid_attrs,
+                 @other_fingerprint,
+                 @expires_at
+               )
+
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    end
+
+    test "rolls back the replay claim when the webhook is invalid" do
+      invalid_attrs = Map.delete(@valid_attrs, :event_type)
+
+      assert {:error, :invalid_webhook} =
+               Webhooks.ingest_authenticated_webhook(invalid_attrs, @fingerprint, @expires_at)
+
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 0
       assert Repo.aggregate(ReceivedWebhook, :count) == 0
     end
   end
