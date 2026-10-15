@@ -25,7 +25,7 @@ Tidewake-Signature: v1=<64_lowercase_hex_characters>
 
 The request body must be a JSON object with these fields:
 
-- `id` is a non-empty string of at most 255 characters that uniquely identifies the event. Ironhold uses it to reject duplicate deliveries.
+- `id` is a non-empty string of at most 255 characters that uniquely identifies the event. Ironhold uses it as an idempotency key: an identical freshly signed retry can be acknowledged, while reuse with different event content is rejected.
 - `type` is a non-empty string of at most 255 characters that identifies the event kind.
 - `data` is a JSON object containing the event payload. Its shape depends on `type`.
 
@@ -70,11 +70,13 @@ An exact replay reuses the same body, timestamp, and validated signature. Ironho
 
 The public envelope shape is checked before persistence. The replay claim and `received_webhooks` row are then inserted in one PostgreSQL transaction. A unique index on the fingerprint decides concurrent exact replays: only one transaction can accept the claim. If webhook changeset validation or persistence fails, the claim insert rolls back.
 
-A retry signed with a new timestamp has a new signature and fingerprint, so it is not an exact cryptographic replay. The existing unique `event_id` constraint still rejects it as a duplicate event if that event was already accepted. The provisional new claim is rolled back. This also applies when the newly signed payload differs but retains an existing `event_id`.
+A retry signed with a new timestamp has a new signature and fingerprint, so it is not an exact cryptographic replay. When its `event_id` already exists, Ironhold compares the authenticated envelope's `type` and decoded `data` with the stored event. If they are identical, Ironhold treats the request as an idempotent retry: it keeps the new replay claim, does not create another webhook, and returns the same generic `202 Accepted` response as the first request. Repeating that newly signed request exactly then reuses its committed fingerprint and returns `409 Conflict` as an exact replay.
+
+If the new signature accompanies a different `type` or `data` under the same `event_id`, Ironhold treats the request as conflicting event-ID reuse. It returns the generic `409 Conflict` response and rolls back the provisional replay claim. In simple terms, event idempotency determines whether newly authenticated content may reuse an event ID, while replay protection determines whether the same authenticated signing attempt has already been processed.
 
 ## Responses
 
-Ironhold returns `202 Accepted` after storing a valid webhook:
+Ironhold returns `202 Accepted` after storing a valid webhook. A freshly signed retry whose `id`, `type`, and decoded `data` match that stored webhook receives the same status and body, without revealing whether this request inserted or reused the event:
 
 ```json
 {
@@ -103,7 +105,7 @@ Ironhold returns `422 Unprocessable Entity` when an authenticated request reache
 }
 ```
 
-Ironhold returns `409 Conflict` for both an exact replay and a newly signed request whose `id` has already been accepted. The public response deliberately does not distinguish the internal `:replay_detected` and `:duplicate_event` reasons. Neither case creates another stored webhook, and a duplicate event does not leave a new replay claim:
+Ironhold returns `409 Conflict` for an exact replay and for a freshly signed request that reuses an accepted `id` with a different `type` or `data`. The public response deliberately does not distinguish the internal `:replay_detected` and `:duplicate_event` reasons. Neither case creates another stored webhook. An exact replay does not create another claim, and conflicting event-ID reuse rolls back its provisional claim:
 
 ```json
 {
@@ -129,7 +131,7 @@ Replay protection emits these additional events:
 - `[:ironhold, :webhooks, :replay, :detected]` with `%{count: 1}` and empty metadata for an exact replay;
 - `[:ironhold, :webhooks, :replay, :cleanup_completed]` with `count` and `duration`, plus `claims_removed` after a successful cleanup. Its metadata contains only `result` (`:ok` or `:error`) and `origin` (`:manual` or `:scheduled`).
 
-`IronholdWeb.Telemetry.metrics/0` exposes counters for accepted claims, detected replays, and completed cleanups, a sum of removed claims, and cleanup duration. Ironhold does not currently configure a metrics reporter, dashboard, or external alert.
+An acknowledged idempotent retry additionally emits `[:ironhold, :webhooks, :ingestion, :idempotent_retry]` with `%{count: 1}` and empty metadata, only after its transaction commits. `IronholdWeb.Telemetry.metrics/0` exposes this as the untagged `ironhold.webhooks.ingestion.idempotent_retry.count` counter, alongside counters for accepted claims, detected replays, and completed cleanups, a sum of removed claims, and cleanup duration. Ironhold does not currently configure a metrics reporter, dashboard, or external alert.
 
 ## Expiration and cleanup
 
@@ -160,6 +162,6 @@ The test sends the same authenticated envelope twice through the Phoenix endpoin
 
 ## Current limitations
 
-This boundary authenticates requests and rejects exact replays, but it does not process event-specific payloads or provide delivery status lookup. It does not rotate or accept multiple simultaneous secrets, rate-limit ingestion, provide administrative authentication, maintain a complete audit trail, export alerts, define deployment, or provide an operational dashboard.
+This boundary authenticates requests, rejects exact replays, and acknowledges freshly signed retries of an identical stored envelope, but it does not process event-specific payloads or provide delivery status lookup. It does not rotate or accept multiple simultaneous secrets, rate-limit ingestion, provide administrative authentication, maintain a complete audit trail, export alerts, define deployment, or provide an operational dashboard.
 
 This is not an end-to-end production integration with Tidewake. Tidewake's Req adapter remains inactive, so real HTTP delivery and Tidewake retries remain pending.
