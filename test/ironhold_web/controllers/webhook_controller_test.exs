@@ -4,7 +4,7 @@ defmodule IronholdWeb.WebhookControllerTest do
   import ExUnit.CaptureLog
 
   alias Ironhold.Repo
-  alias Ironhold.Webhooks.{ReceivedWebhook, ReplayFingerprint}
+  alias Ironhold.Webhooks.{ReceivedWebhook, ReplayFingerprint, WebhookReplayClaim}
 
   @authenticated_body_private_key :ironhold_authenticated_webhook_body
   @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
@@ -41,6 +41,9 @@ defmodule IronholdWeb.WebhookControllerTest do
                "status" => "accepted"
              }
            }
+
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
   end
 
   test "POST /api/webhooks accepts application/json with charset", %{conn: conn} do
@@ -322,26 +325,53 @@ defmodule IronholdWeb.WebhookControllerTest do
     assert invalid_webhook_response(conn)
   end
 
-  test "POST /api/webhooks rejects a duplicate event id", %{conn: conn} do
+  test "POST /api/webhooks rejects an exact replay with the generic conflict response", %{
+    conn: conn
+  } do
     body = Jason.encode!(@valid_webhook)
-    conn = post_json(conn, body)
+    timestamp = current_timestamp()
+
+    first_conn = post_signed(conn, body, timestamp: timestamp)
+    assert response(first_conn, 202)
+
     attach_ingestion_events()
 
-    duplicate_conn =
-      conn
-      |> recycle()
-      |> post_json(body)
+    replay_conn = post_signed(build_conn(), body, timestamp: timestamp)
 
-    assert_receive {:ingestion_event, @rejected_event, %{count: 1},
-                    %{reason: :duplicate_event_id}, false}
+    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :replay_detected},
+                    false}
 
     refute_receive {:ingestion_event, _, _, _, _}
 
-    assert json_response(duplicate_conn, 409) == %{
-             "errors" => [
-               %{"detail" => "a webhook with this id has already been received"}
-             ]
-           }
+    assert_conflict_response(replay_conn)
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+  end
+
+  test "POST /api/webhooks keeps a freshly signed duplicate distinct from an exact replay", %{
+    conn: conn
+  } do
+    body = Jason.encode!(@valid_webhook)
+    first_timestamp = current_timestamp()
+
+    second_timestamp =
+      first_timestamp |> String.to_integer() |> Kernel.+(1) |> Integer.to_string()
+
+    first_conn = post_signed(conn, body, timestamp: first_timestamp)
+    assert response(first_conn, 202)
+
+    attach_ingestion_events()
+
+    duplicate_conn = post_signed(build_conn(), body, timestamp: second_timestamp)
+
+    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
+                    false}
+
+    refute_receive {:ingestion_event, _, _, _, _}
+
+    assert_conflict_response(duplicate_conn)
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
   end
 
   test "the webhook route uses the API pipeline" do
@@ -356,6 +386,14 @@ defmodule IronholdWeb.WebhookControllerTest do
                "/api/webhooks",
                "localhost"
              )
+  end
+
+  defp assert_conflict_response(conn) do
+    assert json_response(conn, 409) == %{
+             "errors" => [
+               %{"detail" => "a webhook with this id has already been received"}
+             ]
+           }
   end
 
   defp accept_json(conn), do: put_req_header(conn, "accept", "application/json")

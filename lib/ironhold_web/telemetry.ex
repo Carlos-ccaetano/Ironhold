@@ -9,7 +9,7 @@ defmodule IronholdWeb.Telemetry do
   @authentication_verified_event [:ironhold, :webhooks, :authentication, :verified]
   @authentication_rejected_event [:ironhold, :webhooks, :authentication, :rejected]
   @identifier_mismatch_event [:ironhold, :webhooks, :authentication, :identifier_mismatch]
-  @rejection_reasons [:validation, :duplicate_event_id, :unsupported_media_type]
+  @rejection_reasons [:validation, :replay_detected, :duplicate_event, :unsupported_media_type]
 
   def start_link(arg) do
     Supervisor.start_link(__MODULE__, arg, name: __MODULE__)

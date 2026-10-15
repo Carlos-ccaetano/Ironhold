@@ -6,12 +6,24 @@ defmodule IronholdWeb.WebhookController do
 
   plug IronholdWeb.Plugs.RequireMatchingWebhookId when action == :create
 
+  @replay_metadata_private_key :ironhold_authenticated_webhook_replay
   @invalid_webhook_message "id, type, and data must be provided in the expected format"
-  @duplicate_webhook_message "a webhook with this id has already been received"
+  @conflict_message "a webhook with this id has already been received"
 
-  def create(conn, params) do
+  def create(
+        %Plug.Conn{
+          private: %{
+            @replay_metadata_private_key => %{
+              fingerprint: fingerprint,
+              expires_at: expires_at
+            }
+          }
+        } = conn,
+        params
+      ) do
     with {:ok, attrs} <- webhook_attrs(params),
-         {:ok, webhook} <- Webhooks.receive_webhook(attrs) do
+         {:ok, webhook} <-
+           Webhooks.ingest_authenticated_webhook(attrs, fingerprint, expires_at) do
       Telemetry.emit_ingestion_accepted()
 
       conn
@@ -23,13 +35,8 @@ defmodule IronholdWeb.WebhookController do
         }
       })
     else
-      {:error, :duplicate_event_id} ->
-        rejection_response(
-          conn,
-          :conflict,
-          @duplicate_webhook_message,
-          :duplicate_event_id
-        )
+      {:error, reason} when reason in [:replay_detected, :duplicate_event] ->
+        rejection_response(conn, :conflict, @conflict_message, reason)
 
       {:error, %Ecto.Changeset{}} ->
         rejection_response(conn, :unprocessable_entity, @invalid_webhook_message, :validation)
