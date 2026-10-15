@@ -2,13 +2,19 @@ defmodule IronholdWeb.WebhookControllerTest do
   use IronholdWeb.ConnCase, async: false
 
   import ExUnit.CaptureLog
+  import Ecto.Query, only: [from: 2]
 
+  alias Ecto.Adapters.SQL.Sandbox
   alias Ironhold.Repo
   alias Ironhold.Webhooks.{ReceivedWebhook, ReplayFingerprint, WebhookReplayClaim}
 
   @authenticated_body_private_key :ironhold_authenticated_webhook_body
   @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
   @accepted_event [:ironhold, :webhooks, :ingestion, :accepted]
+  @concurrent_request_count 6
+  @conflict_response %{
+    "errors" => [%{"detail" => "a webhook with this id has already been received"}]
+  }
   @rejected_event [:ironhold, :webhooks, :ingestion, :rejected]
   @max_body_size 262_144
   @replay_metadata_private_key :ironhold_authenticated_webhook_replay
@@ -445,6 +451,62 @@ defmodule IronholdWeb.WebhookControllerTest do
       assert Repo.aggregate(ReceivedWebhook, :count) == 1
       assert Repo.aggregate(WebhookReplayClaim, :count) == 1
     end
+
+    @tag unboxed: true
+    test "lets the database unique constraint arbitrate simultaneous exact replays" do
+      event_id = "evt_concurrent_#{System.unique_integer([:positive])}"
+      body = Jason.encode!(%{@valid_webhook | id: event_id})
+      timestamp = current_timestamp()
+      validated_signature = signature(event_id, timestamp, body)
+      fingerprint = ReplayFingerprint.derive(validated_signature)
+      barrier_ref = make_ref()
+
+      assert_unique_fingerprint_index()
+      register_concurrent_cleanup(event_id, fingerprint)
+      attach_concurrent_ingestion_events(barrier_ref)
+
+      request = fn ->
+        post_signed(build_conn(), body,
+          timestamp: timestamp,
+          signature: validated_signature
+        )
+      end
+
+      workers =
+        for _request_number <- 1..@concurrent_request_count do
+          spawn_concurrent_request(self(), barrier_ref, request)
+        end
+
+      await_workers_ready(workers, barrier_ref)
+      release_workers(workers, barrier_ref)
+      results = Enum.map(workers, &await_worker_result(&1, barrier_ref))
+      outcomes = collect_concurrent_ingestion_outcomes(barrier_ref)
+
+      assert Enum.frequencies(Enum.map(results, & &1.status)) == %{
+               202 => 1,
+               409 => @concurrent_request_count - 1
+             }
+
+      refute Enum.any?(results, &(&1.status >= 500))
+
+      assert [%{body: %{"data" => %{"event_id" => ^event_id, "status" => "accepted"}}}] =
+               Enum.filter(results, &(&1.status == 202))
+
+      assert Enum.all?(
+               Enum.filter(results, &(&1.status == 409)),
+               &(&1.body == @conflict_response)
+             )
+
+      assert Enum.frequencies(outcomes) == %{
+               accepted: 1,
+               replay_detected: @concurrent_request_count - 1
+             }
+
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: fingerprint)
+      assert Repo.get_by(ReceivedWebhook, event_id: event_id)
+    end
   end
 
   test "the webhook route uses the API pipeline" do
@@ -471,11 +533,7 @@ defmodule IronholdWeb.WebhookControllerTest do
   end
 
   defp assert_conflict_response(conn, sensitive_values) do
-    assert json_response(conn, 409) == %{
-             "errors" => [
-               %{"detail" => "a webhook with this id has already been received"}
-             ]
-           }
+    assert json_response(conn, 409) == @conflict_response
 
     Enum.each(sensitive_values, &refute(conn.resp_body =~ &1))
 
@@ -571,6 +629,118 @@ defmodule IronholdWeb.WebhookControllerTest do
     |> String.to_integer()
     |> Kernel.+(seconds)
     |> Integer.to_string()
+  end
+
+  defp assert_unique_fingerprint_index do
+    assert %{rows: [[index_definition]]} =
+             Repo.query!(
+               """
+               SELECT indexdef
+               FROM pg_indexes
+               WHERE schemaname = current_schema() AND indexname = $1
+               """,
+               ["webhook_replay_claims_fingerprint_index"]
+             )
+
+    assert index_definition =~ "CREATE UNIQUE INDEX"
+  end
+
+  defp register_concurrent_cleanup(event_id, fingerprint) do
+    on_exit(fn ->
+      :ok = Sandbox.checkout(Repo, sandbox: false)
+
+      try do
+        Repo.delete_all(from webhook in ReceivedWebhook, where: webhook.event_id == ^event_id)
+
+        Repo.delete_all(
+          from claim in WebhookReplayClaim, where: claim.fingerprint == ^fingerprint
+        )
+      after
+        :ok = Sandbox.checkin(Repo)
+      end
+    end)
+  end
+
+  defp attach_concurrent_ingestion_events(barrier_ref) do
+    handler_id = {__MODULE__, self(), barrier_ref}
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [@accepted_event, @rejected_event],
+        fn event, _measurements, metadata, _config ->
+          send(test_pid, {barrier_ref, :ingestion_event, event, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp spawn_concurrent_request(parent, barrier_ref, request) do
+    spawn_monitor(fn ->
+      :ok = Sandbox.checkout(Repo, sandbox: false)
+
+      try do
+        send(parent, {barrier_ref, :ready, self()})
+
+        receive do
+          {^barrier_ref, :go} -> :ok
+        after
+          10_000 -> exit(:barrier_timeout)
+        end
+
+        conn = request.()
+
+        send(parent, {
+          barrier_ref,
+          :result,
+          self(),
+          %{status: conn.status, body: Jason.decode!(conn.resp_body)}
+        })
+      after
+        :ok = Sandbox.checkin(Repo)
+      end
+    end)
+  end
+
+  defp await_workers_ready(workers, barrier_ref) do
+    Enum.each(workers, fn {pid, _monitor_ref} ->
+      assert_receive {^barrier_ref, :ready, ^pid}, 10_000
+    end)
+  end
+
+  defp release_workers(workers, barrier_ref) do
+    Enum.each(workers, fn {pid, _monitor_ref} ->
+      send(pid, {barrier_ref, :go})
+    end)
+  end
+
+  defp await_worker_result({pid, monitor_ref}, barrier_ref) do
+    result =
+      receive do
+        {^barrier_ref, :result, ^pid, result} -> result
+      after
+        10_000 -> flunk("concurrent request #{inspect(pid)} did not return")
+      end
+
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, :normal}, 10_000
+    result
+  end
+
+  defp collect_concurrent_ingestion_outcomes(barrier_ref) do
+    for _event_number <- 1..@concurrent_request_count do
+      receive do
+        {^barrier_ref, :ingestion_event, @accepted_event, %{}} ->
+          :accepted
+
+        {^barrier_ref, :ingestion_event, @rejected_event, %{reason: reason}} ->
+          reason
+      after
+        10_000 -> flunk("concurrent ingestion telemetry was not emitted")
+      end
+    end
   end
 
   defp signature(header_id, timestamp, body) do

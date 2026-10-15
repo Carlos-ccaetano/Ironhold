@@ -23,6 +23,11 @@ defmodule Ironhold.DataCase do
     :ok
   end
 
+  def setup_sandbox(%{unboxed: true}) do
+    owner = Sandbox.start_owner!(Ironhold.Repo, sandbox: false)
+    on_exit(fn -> Sandbox.stop_owner(owner) end)
+  end
+
   def setup_sandbox(tags) do
     owner = Sandbox.start_owner!(Ironhold.Repo, shared: not tags[:async])
     on_exit(fn -> Sandbox.stop_owner(owner) end)
