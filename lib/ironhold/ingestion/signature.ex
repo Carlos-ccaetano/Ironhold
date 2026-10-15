@@ -14,12 +14,13 @@ defmodule Ironhold.Ingestion.Signature do
   @invalid_signature {:error, :invalid_signature}
 
   @doc """
-  Verifies a version 1 signature and returns the authenticated header ID.
+  Verifies a version 1 signature and returns normalized authenticated values.
 
   Every invalid input or failed check returns `{:error, :invalid_signature}`.
   """
   @spec verify(binary(), binary(), binary(), binary(), binary(), integer()) ::
-          {:ok, binary()} | {:error, :invalid_signature}
+          {:ok, %{event_id: binary(), signed_at: non_neg_integer()}}
+          | {:error, :invalid_signature}
   def verify(header_id, timestamp, signature, body, secret, current_time) do
     with true <- valid_id?(header_id),
          {:ok, signed_at} <- parse_timestamp(timestamp),
@@ -29,11 +30,23 @@ defmodule Ironhold.Ingestion.Signature do
          true <- is_binary(body),
          true <- valid_secret?(secret),
          true <- signature_matches?(signature, header_id, timestamp, body, secret) do
-      {:ok, header_id}
+      {:ok, %{event_id: header_id, signed_at: signed_at}}
     else
       _invalid -> @invalid_signature
     end
   end
+
+  @doc """
+  Returns when a successfully authenticated signing timestamp leaves the
+  accepted past-age window.
+  """
+  @spec acceptance_expires_at(integer()) ::
+          {:ok, DateTime.t()} | {:error, :invalid_signed_at | :invalid_unix_time}
+  def acceptance_expires_at(signed_at) when is_integer(signed_at) and signed_at >= 0 do
+    DateTime.from_unix(signed_at + @max_past_age_seconds)
+  end
+
+  def acceptance_expires_at(_signed_at), do: {:error, :invalid_signed_at}
 
   defp valid_id?(header_id), do: is_binary(header_id) and byte_size(header_id) > 0
 

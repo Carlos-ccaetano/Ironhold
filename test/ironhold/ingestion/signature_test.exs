@@ -11,6 +11,7 @@ defmodule Ironhold.Ingestion.SignatureTest do
   @body ~S({"data":{"ok":true},"id":"evt_test_123","type":"test.ping"})
   @secret "tidewake_test_secret_not_for_production"
   @signature "v1=3323d158355377e1b2d7515e31a40365a48ff11d427a8a8f62cfda1e4bf92128"
+  @authenticated_result %{event_id: @event_id, signed_at: @current_time}
 
   test "verifies the exact shared Tidewake vector" do
     assert Signature.verify(
@@ -20,10 +21,10 @@ defmodule Ironhold.Ingestion.SignatureTest do
              @body,
              @secret,
              @current_time
-           ) == {:ok, @event_id}
+           ) == {:ok, @authenticated_result}
   end
 
-  test "returns only the verified ID on success" do
+  test "returns only normalized authenticated values on success" do
     result =
       Signature.verify(
         @event_id,
@@ -34,7 +35,7 @@ defmodule Ironhold.Ingestion.SignatureTest do
         @current_time
       )
 
-    assert result == {:ok, @event_id}
+    assert result == {:ok, @authenticated_result}
     refute inspect(result) =~ @secret
     refute inspect(result) =~ @signature
   end
@@ -42,13 +43,20 @@ defmodule Ironhold.Ingestion.SignatureTest do
   test "accepts the inclusive past boundary" do
     timestamp = Integer.to_string(@current_time - 300)
 
-    assert verify(timestamp, signature_for(timestamp)) == {:ok, @event_id}
+    assert verify(timestamp, signature_for(timestamp)) ==
+             {:ok, %{event_id: @event_id, signed_at: @current_time - 300}}
   end
 
   test "accepts the inclusive future boundary" do
     timestamp = Integer.to_string(@current_time + 30)
 
-    assert verify(timestamp, signature_for(timestamp)) == {:ok, @event_id}
+    assert verify(timestamp, signature_for(timestamp)) ==
+             {:ok, %{event_id: @event_id, signed_at: @current_time + 30}}
+  end
+
+  test "derives expiration from the existing past-age window" do
+    assert Signature.acceptance_expires_at(@current_time) ==
+             {:ok, ~U[2023-11-14 22:18:20Z]}
   end
 
   test "rejects one second beyond the past boundary" do
@@ -142,7 +150,7 @@ defmodule Ironhold.Ingestion.SignatureTest do
   test "does not log successful or rejected verification data" do
     log =
       capture_log([level: :debug], fn ->
-        assert verify(@timestamp, @signature) == {:ok, @event_id}
+        assert verify(@timestamp, @signature) == {:ok, @authenticated_result}
 
         assert verify(@timestamp, String.replace_suffix(@signature, "8", "9")) ==
                  {:error, :invalid_signature}

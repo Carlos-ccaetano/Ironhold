@@ -5,19 +5,34 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookIdTest do
   import Plug.Test
 
   alias Ironhold.Repo
-  alias Ironhold.Webhooks.ReceivedWebhook
+  alias Ironhold.Webhooks.{ReceivedWebhook, ReplayFingerprint}
   alias IronholdWeb.Plugs.RequireMatchingWebhookId
 
+  @authenticated_body_private_key :ironhold_authenticated_webhook_body
+  @authenticated_body_consumed_private_key :ironhold_authenticated_webhook_body_consumed
   @authenticated_id_private_key :ironhold_authenticated_webhook_id
+  @authenticated_signed_at_private_key :ironhold_authenticated_webhook_signed_at
   @identifier_mismatch_event [:ironhold, :webhooks, :authentication, :identifier_mismatch]
   @invalid_signature_response ~s({"errors":[{"detail":"valid webhook signature required"}]})
   @opts RequireMatchingWebhookId.init([])
+  @replay_metadata_private_key :ironhold_authenticated_webhook_replay
+  @signed_at 1_700_000_000
+  @validated_signature "v1=" <> String.duplicate("a", 64)
 
-  test "continues with the unchanged connection when IDs match" do
+  test "attaches safe replay metadata only after IDs match" do
     attach_identifier_mismatch_event()
     conn = matching_conn("evt_test_123", %{"id" => "evt_test_123"})
 
-    assert RequireMatchingWebhookId.call(conn, @opts) == conn
+    returned_conn = RequireMatchingWebhookId.call(conn, @opts)
+
+    assert returned_conn.private[@replay_metadata_private_key] == %{
+             fingerprint: ReplayFingerprint.derive(@validated_signature),
+             expires_at: ~U[2023-11-14 22:18:20Z]
+           }
+
+    refute Map.has_key?(returned_conn.private, @authenticated_body_private_key)
+    refute Map.has_key?(returned_conn.private, @authenticated_body_consumed_private_key)
+    refute Map.has_key?(returned_conn.private, @authenticated_signed_at_private_key)
     refute_receive {:identifier_mismatch_event, _, _}
   end
 
@@ -106,7 +121,11 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookIdTest do
   defp authenticated_conn(authenticated_id) do
     :post
     |> conn("/api/webhooks")
+    |> put_req_header("tidewake-signature", @validated_signature)
+    |> put_private(@authenticated_body_private_key, "authenticated body")
+    |> put_private(@authenticated_body_consumed_private_key, true)
     |> put_private(@authenticated_id_private_key, authenticated_id)
+    |> put_private(@authenticated_signed_at_private_key, @signed_at)
   end
 
   defp body_params_conn(body_params) do
@@ -121,6 +140,9 @@ defmodule IronholdWeb.Plugs.RequireMatchingWebhookIdTest do
     assert returned_conn.halted
     assert returned_conn.status == 401
     assert returned_conn.resp_body == @invalid_signature_response
+    refute Map.has_key?(returned_conn.private, @replay_metadata_private_key)
+    refute Map.has_key?(returned_conn.private, @authenticated_body_private_key)
+    refute Map.has_key?(returned_conn.private, @authenticated_signed_at_private_key)
   end
 
   defp attach_identifier_mismatch_event do
