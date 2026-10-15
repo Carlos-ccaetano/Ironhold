@@ -141,4 +141,43 @@ defmodule Ironhold.WebhooksTest do
       assert Repo.aggregate(ReceivedWebhook, :count) == 0
     end
   end
+
+  describe "prune_expired_replay_claims/1" do
+    test "removes claims at or before the reference time and returns the count" do
+      expired_fingerprint = String.duplicate("c", 64)
+      boundary_fingerprint = String.duplicate("d", 64)
+      future_fingerprint = String.duplicate("e", 64)
+
+      insert_replay_claim(expired_fingerprint, DateTime.add(@expires_at, -1, :microsecond))
+      insert_replay_claim(boundary_fingerprint, @expires_at)
+      insert_replay_claim(future_fingerprint, DateTime.add(@expires_at, 1, :microsecond))
+
+      assert Webhooks.prune_expired_replay_claims(@expires_at) == 2
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: future_fingerprint)
+    end
+
+    test "is safe and idempotent when run repeatedly" do
+      insert_replay_claim(@fingerprint, DateTime.add(@expires_at, -1, :second))
+      insert_replay_claim(@other_fingerprint, DateTime.add(@expires_at, 1, :second))
+
+      assert Webhooks.prune_expired_replay_claims(@expires_at) == 1
+      assert Webhooks.prune_expired_replay_claims(@expires_at) == 0
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: @other_fingerprint)
+    end
+
+    test "does not affect received webhooks" do
+      assert {:ok, webhook} = Webhooks.receive_webhook(@valid_attrs, @received_at)
+      insert_replay_claim(@fingerprint, @expires_at)
+
+      assert Webhooks.prune_expired_replay_claims(@expires_at) == 1
+      assert Repo.get!(ReceivedWebhook, webhook.id)
+    end
+  end
+
+  defp insert_replay_claim(fingerprint, expires_at) do
+    %WebhookReplayClaim{}
+    |> WebhookReplayClaim.changeset(%{fingerprint: fingerprint, expires_at: expires_at})
+    |> Repo.insert!()
+  end
 end
