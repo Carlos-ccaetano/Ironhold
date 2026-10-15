@@ -53,7 +53,7 @@ The configured secret, presented or expected signature, and raw request body mus
 
 ### Replay protection
 
-The timestamp window limits the age of an acceptable request but does not prevent reuse inside that window. Replay protection and any replay-state persistence remain a separate decision and implementation stage.
+The timestamp window limits the age of an acceptable request but does not prevent reuse inside that window. Replay protection and replay-state persistence are governed separately by [ADR 0005](0005-webhook-replay-protection.md) and are now implemented after the authentication boundary defined here.
 
 ## Consequences
 
@@ -66,3 +66,7 @@ The timestamp window limits the age of an acceptable request but does not preven
 ## Out of scope
 
 This ADR does not implement configuration, raw-body capture, plugs, controller changes, HMAC verification, tests, replay protection, secret rotation, or multiple simultaneous secrets.
+
+## Implementation status
+
+The authentication policy in this ADR is implemented. Replay protection was subsequently specified in [ADR 0005](0005-webhook-replay-protection.md). Secret rotation and multiple simultaneous secrets remain unimplemented.

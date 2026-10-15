@@ -7,7 +7,7 @@
 
 Ironhold receives webhook envelopes through `POST /api/webhooks`. The endpoint currently enforces JSON media type and raw-body size boundaries, then `Plug.Parsers` decodes the request before the controller validates and persists it. This protects the HTTP boundary but does not authenticate the sender or prove that the persisted envelope came from bytes signed by Tidewake.
 
-Tidewake ADR 0012 defines a future shared-secret protocol over the exact serialized body sent to the delivery adapter. Ironhold must adopt that protocol without reconstructing JSON or changing any wire representation. This decision records the receiver contract and verification order before implementation. It does not claim that signed ingestion, secret configuration, timestamp validation, or replay protection exists today.
+Tidewake ADR 0012 defines a shared-secret protocol over the exact serialized body sent to the delivery adapter. Ironhold must adopt that protocol without reconstructing JSON or changing any wire representation. This decision recorded the receiver contract and verification order before implementation; the current implementation status is documented below.
 
 ## Decision
 
@@ -55,9 +55,9 @@ After the existing HTTP media-type boundary admits the request, signed ingestion
 4. Read the bounded raw request body and calculate HMAC-SHA256 over the canonical input containing those exact bytes.
 5. Compare the complete expected and presented signatures in constant time.
 6. Only after successful verification, decode the same raw bytes as JSON, apply the existing envelope validation, and persist the accepted webhook.
-7. Add explicit replay protection in a later stage without changing the version 1 canonical input.
+7. Integrate explicit replay protection as a separate stage without changing the version 1 canonical input.
 
-No controller or context operation may run for an authentication failure, and no `received_webhooks` row may be created. The existing unique `event_id` constraint provides persistence idempotency for duplicates, but it is not a complete replay defense: it does not authenticate requests, enforce timestamp use, or define how valid repeated signatures are rejected. Replay protection remains a separate follow-up.
+No controller or context operation may run for an authentication failure, and no `received_webhooks` row may be created. The existing unique `event_id` constraint provides persistence idempotency for duplicates, but it is not a complete replay defense: it does not authenticate requests, enforce timestamp use, or define how valid repeated signatures are rejected. Replay protection is governed separately by [ADR 0005](0005-webhook-replay-protection.md).
 
 ### Raw-body boundary
 
@@ -164,7 +164,7 @@ Rejected because untrusted content would cross the persistence boundary and clea
 
 Rejected because database idempotency does not authenticate the request or provide an explicit time-bounded replay policy.
 
-## Deliberately deferred
+## Deliberately deferred from this decision
 
 - HMAC verification implementation;
 - raw-body capture or parser integration;
@@ -176,8 +176,8 @@ Rejected because database idempotency does not authenticate the request or provi
 - multiple senders or per-sender secrets;
 - logs, metrics reporters, dashboards, or alerts for signed ingestion.
 
-## Follow-up
+## Implementation status
 
-Implement the raw-body verification boundary in a separate change with tests for the shared vector, all fail-closed cases, exact verification order, constant-time comparison, no persistence before successful verification, parser handoff of the same bytes, and non-disclosure in responses, logs, and Telemetry.
+The raw-body verification boundary, temporal policy, generic authentication response, and production secret provisioning are implemented. Replay protection was subsequently defined by [ADR 0005](0005-webhook-replay-protection.md) and implemented without changing the version 1 canonical input. Secret rotation, overlapping secrets, multiple senders, external reporters, dashboards, and alerts remain pending.
 
-Define the temporal-window value, stable public authentication response, secret provisioning, and replay-protection semantics before signed ingestion is enabled in production.
+The HTTP contract and current limitations are documented in [the webhook API](../api/webhooks.md).

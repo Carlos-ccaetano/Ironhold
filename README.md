@@ -8,7 +8,9 @@ This repository contains the project foundation and an authenticated webhook ing
 
 `POST /api/webhooks` requires exactly one `Tidewake-Id`, `Tidewake-Timestamp`, and `Tidewake-Signature` header. Ironhold verifies HMAC-SHA256 over `v1.<event_id>.<timestamp>.<exact_body_bytes>` before JSON decoding, accepts timestamps from 300 seconds in the past through 30 seconds in the future, and requires the authenticated header ID to match the decoded body ID exactly. Authentication failures return the generic `401` response defined by [ADR 0004](docs/adr/0004-webhook-authentication-policy.md). Production reads the shared secret from `IRONHOLD_WEBHOOK_SIGNING_SECRET`.
 
-Ingestion and authentication emit separate low-cardinality Telemetry events and counters. Replay protection, storage of used nonces or signatures, secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, and an operational dashboard remain unimplemented. This receiver boundary is not an end-to-end production integration: Tidewake's Req adapter remains inactive, so real HTTP delivery, retries, backoff, and Tidewake-side SSRF protection are still pending.
+After authentication, Ironhold derives an irreversible SHA-256 replay fingerprint from the validated signature. It atomically inserts that claim with the received webhook in PostgreSQL. Reusing the same authenticated envelope is rejected as replay; signing the same `event_id` again with a new timestamp creates a different fingerprint and is rejected by event-id idempotency instead. Both conflicts return the same generic `409` response. A supervised cleanup process removes expired claims every five minutes by default.
+
+Ingestion, authentication, replay decisions, and replay cleanup emit low-cardinality Telemetry events and metrics. Raw signatures, shared secrets, complete signing headers, raw request bodies, URLs, and client IPs are not stored as replay state or attached to replay Telemetry. Secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, external metrics reporting and alerts, administrative authentication, deployment, and an operational dashboard remain unimplemented. This receiver boundary is not an end-to-end production integration: Tidewake's Req adapter remains inactive, so real HTTP delivery and Tidewake retries are still pending.
 
 ## Stack
 
@@ -68,9 +70,19 @@ mix test
 - `test` contains ExUnit support modules and HTTP tests.
 - `docs` records architectural boundaries, the roadmap, and decisions.
 
+## Replay cleanup configuration
+
+The cleanup worker is supervised as `Ironhold.Webhooks.ReplayCleanup`. Its interval is configured in application configuration and defaults to five minutes:
+
+```elixir
+config :ironhold, Ironhold.Webhooks.ReplayCleanup, interval: :timer.minutes(5)
+```
+
+Tests use `interval: :infinity` and trigger cleanup explicitly. There is currently no environment variable for this interval.
+
 ## Roadmap
 
-The next increments will add replay protection, operational controls, and audit retention before an authenticated dashboard is considered. See [docs/roadmap.md](docs/roadmap.md) for the staged plan.
+Replay protection is implemented. The next increments concern the remaining operational controls and audit retention before an authenticated dashboard is considered. See [docs/roadmap.md](docs/roadmap.md) for the staged plan.
 
 The initial HTTP contract is documented in [docs/api/webhooks.md](docs/api/webhooks.md).
 

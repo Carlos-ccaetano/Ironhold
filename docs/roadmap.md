@@ -33,19 +33,32 @@ These persistence and HTTP boundaries are now combined with the authenticated bo
 - authentication failures return the generic `401` response from ADR 0004 before persistence
 - production requires `IRONHOLD_WEBHOOK_SIGNING_SECRET` with at least 32 bytes
 - verified signatures, authentication rejections, and identifier mismatches emit separate low-cardinality Telemetry events and counters
-- replay protection, used-nonce or signature storage, and secret rotation or multiple simultaneous secrets remain pending
+- secret rotation and multiple simultaneous secrets remain pending
 
-## 4. Operational protection and audit
+## 4. Replay protection — implemented
+
+- authentication and temporal validation complete before replay metadata is created
+- a versioned SHA-256 fingerprint of the validated signature distinguishes exact replay from a newly signed attempt
+- only the 64-character lowercase irreversible fingerprint, expiration, and insertion time are stored as replay state
+- `Ecto.Multi` inserts the replay claim and received webhook in one PostgreSQL transaction
+- unique database constraints classify exact replay separately from duplicate `event_id`, while both return the generic `409` response
+- failed webhook insertion rolls back the provisional replay claim
+- concurrent identical requests are arbitrated by the fingerprint constraint rather than process-local coordination
+- `Ironhold.Webhooks.ReplayCleanup` is supervised, defaults to a five-minute interval, and removes expired claims with one idempotent database operation
+- replay acceptance, detection, cleanup count, removed-claim count, duration, result, and origin have low-cardinality Telemetry events and metrics
+- HTTP, context, concurrency, cleanup, and Telemetry tests cover the implemented security contract
+
+## 5. Operational protection and audit
 
 - Add rate limiting and abuse controls
 - Define structured audit records, retention, and restricted access
-- Export useful Telemetry metrics, traces, and alerts
+- Export the declared Telemetry metrics and add useful traces and external alerts
 
-## 5. Product interface
+## 6. Product interface
 
-- Add authentication and authorization
+- Add administrative authentication and authorization
 - Consider an operational dashboard only after its concrete user needs and access model are known
 
-The project foundation, authenticated webhook ingestion, HTTP boundaries, field limits, and ingestion and authentication Telemetry are implemented. Replay protection, used-nonce or signature storage, secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, and the operational dashboard remain planned work.
+The project foundation, authenticated webhook ingestion, HTTP boundaries, field limits, durable replay protection, supervised claim cleanup, and ingestion, authentication, and replay Telemetry are implemented. Secret rotation and multiple simultaneous secrets, rate limiting, a complete audit trail, administrative authentication, external alerts, deployment, and an operational dashboard remain planned work.
 
-End-to-end production delivery is not complete. Tidewake's Req adapter remains inactive, so real HTTP delivery, retries, backoff, and Tidewake-side SSRF protection remain pending.
+End-to-end production delivery is not complete. Tidewake's Req adapter remains inactive, so real HTTP delivery and Tidewake retries remain pending.
