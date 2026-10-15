@@ -25,27 +25,6 @@ defmodule IronholdWeb.WebhookControllerTest do
     }
   }
 
-  test "POST /api/webhooks accepts and stores a valid webhook", %{conn: conn} do
-    attach_ingestion_events("evt_123")
-
-    conn =
-      conn
-      |> post_json(Jason.encode!(@valid_webhook))
-
-    assert_receive {:ingestion_event, @accepted_event, %{count: 1}, %{}, true}
-    refute_receive {:ingestion_event, _, _, _, _}
-
-    assert json_response(conn, 202) == %{
-             "data" => %{
-               "event_id" => "evt_123",
-               "status" => "accepted"
-             }
-           }
-
-    assert Repo.aggregate(ReceivedWebhook, :count) == 1
-    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
-  end
-
   test "POST /api/webhooks accepts application/json with charset", %{conn: conn} do
     body = Jason.encode!(%{@valid_webhook | id: "evt_with_charset"})
 
@@ -80,22 +59,6 @@ defmodule IronholdWeb.WebhookControllerTest do
 
   test "POST /api/webhooks rejects a request without signing headers", %{conn: conn} do
     conn = post_with_content_type(conn, Jason.encode!(@valid_webhook), "application/json")
-
-    assert_authentication_failure(conn)
-  end
-
-  test "POST /api/webhooks rejects an incorrect signature", %{conn: conn} do
-    conn =
-      post_signed(conn, Jason.encode!(@valid_webhook),
-        signature: "v1=" <> String.duplicate("0", 64)
-      )
-
-    assert_authentication_failure(conn)
-  end
-
-  test "POST /api/webhooks rejects a stale timestamp", %{conn: conn} do
-    timestamp = (System.system_time(:second) - 301) |> Integer.to_string()
-    conn = post_signed(conn, Jason.encode!(@valid_webhook), timestamp: timestamp)
 
     assert_authentication_failure(conn)
   end
@@ -325,53 +288,163 @@ defmodule IronholdWeb.WebhookControllerTest do
     assert invalid_webhook_response(conn)
   end
 
-  test "POST /api/webhooks rejects an exact replay with the generic conflict response", %{
-    conn: conn
-  } do
-    body = Jason.encode!(@valid_webhook)
-    timestamp = current_timestamp()
+  describe "public replay protection semantics" do
+    test "accepts and atomically persists the first valid request", %{conn: conn} do
+      body = Jason.encode!(@valid_webhook)
+      timestamp = current_timestamp()
+      validated_signature = signature("evt_123", timestamp, body)
 
-    first_conn = post_signed(conn, body, timestamp: timestamp)
-    assert response(first_conn, 202)
+      attach_ingestion_events("evt_123")
 
-    attach_ingestion_events()
+      accepted_conn =
+        post_signed(conn, body, timestamp: timestamp, signature: validated_signature)
 
-    replay_conn = post_signed(build_conn(), body, timestamp: timestamp)
+      assert_receive {:ingestion_event, @accepted_event, %{count: 1}, %{}, true}
+      refute_receive {:ingestion_event, _, _, _, _}
 
-    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :replay_detected},
-                    false}
+      assert_accepted_response(accepted_conn, "evt_123")
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
 
-    refute_receive {:ingestion_event, _, _, _, _}
+      assert Repo.get_by(WebhookReplayClaim,
+               fingerprint: ReplayFingerprint.derive(validated_signature)
+             )
+    end
 
-    assert_conflict_response(replay_conn)
-    assert Repo.aggregate(ReceivedWebhook, :count) == 1
-    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
-  end
+    test "rejects the same body, timestamp, and signature as an exact replay", %{conn: conn} do
+      body = Jason.encode!(@valid_webhook)
+      timestamp = current_timestamp()
+      validated_signature = signature("evt_123", timestamp, body)
+      fingerprint = ReplayFingerprint.derive(validated_signature)
 
-  test "POST /api/webhooks keeps a freshly signed duplicate distinct from an exact replay", %{
-    conn: conn
-  } do
-    body = Jason.encode!(@valid_webhook)
-    first_timestamp = current_timestamp()
+      accepted_conn =
+        post_signed(conn, body, timestamp: timestamp, signature: validated_signature)
 
-    second_timestamp =
-      first_timestamp |> String.to_integer() |> Kernel.+(1) |> Integer.to_string()
+      assert_accepted_response(accepted_conn, "evt_123")
+      attach_ingestion_events()
 
-    first_conn = post_signed(conn, body, timestamp: first_timestamp)
-    assert response(first_conn, 202)
+      replay_conn =
+        post_signed(build_conn(), body,
+          timestamp: timestamp,
+          signature: validated_signature
+        )
 
-    attach_ingestion_events()
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :replay_detected},
+                      false}
 
-    duplicate_conn = post_signed(build_conn(), body, timestamp: second_timestamp)
+      refute_receive {:ingestion_event, _, _, _, _}
 
-    assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
-                    false}
+      assert_conflict_response(replay_conn, [validated_signature, fingerprint])
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: fingerprint)
+    end
 
-    refute_receive {:ingestion_event, _, _, _, _}
+    test "treats a freshly signed request for the same event as a duplicate event", %{conn: conn} do
+      body = Jason.encode!(@valid_webhook)
+      first_timestamp = current_timestamp()
+      second_timestamp = shift_timestamp(first_timestamp, 1)
+      first_signature = signature("evt_123", first_timestamp, body)
+      second_signature = signature("evt_123", second_timestamp, body)
+      first_fingerprint = ReplayFingerprint.derive(first_signature)
+      second_fingerprint = ReplayFingerprint.derive(second_signature)
 
-    assert_conflict_response(duplicate_conn)
-    assert Repo.aggregate(ReceivedWebhook, :count) == 1
-    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      refute first_signature == second_signature
+
+      assert_accepted_response(
+        post_signed(conn, body, timestamp: first_timestamp, signature: first_signature),
+        "evt_123"
+      )
+
+      attach_ingestion_events()
+
+      duplicate_conn =
+        post_signed(build_conn(), body,
+          timestamp: second_timestamp,
+          signature: second_signature
+        )
+
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
+                      false}
+
+      refute_receive {:ingestion_event, _, _, _, _}
+
+      assert_conflict_response(duplicate_conn, [second_signature, second_fingerprint])
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
+      refute Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
+    end
+
+    test "rejects a changed payload with a new signature through event id idempotency", %{
+      conn: conn
+    } do
+      first_body = Jason.encode!(@valid_webhook)
+      changed_body = Jason.encode!(put_in(@valid_webhook, [:data, :status], "updated"))
+      first_timestamp = current_timestamp()
+      second_timestamp = shift_timestamp(first_timestamp, 1)
+      first_signature = signature("evt_123", first_timestamp, first_body)
+      second_signature = signature("evt_123", second_timestamp, changed_body)
+      first_fingerprint = ReplayFingerprint.derive(first_signature)
+      second_fingerprint = ReplayFingerprint.derive(second_signature)
+
+      refute first_signature == second_signature
+
+      assert_accepted_response(
+        post_signed(conn, first_body, timestamp: first_timestamp, signature: first_signature),
+        "evt_123"
+      )
+
+      attach_ingestion_events()
+
+      duplicate_conn =
+        post_signed(build_conn(), changed_body,
+          timestamp: second_timestamp,
+          signature: second_signature
+        )
+
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :duplicate_event},
+                      false}
+
+      refute_receive {:ingestion_event, _, _, _, _}
+
+      assert_conflict_response(duplicate_conn, [second_signature, second_fingerprint])
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+      assert Repo.get_by(WebhookReplayClaim, fingerprint: first_fingerprint)
+      refute Repo.get_by(WebhookReplayClaim, fingerprint: second_fingerprint)
+    end
+
+    test "rejects an invalid signature before creating replay state", %{conn: conn} do
+      body = Jason.encode!(@valid_webhook)
+      timestamp = current_timestamp()
+      invalid_signature = "v1=" <> String.duplicate("0", 64)
+
+      rejected_conn =
+        post_signed(conn, body, timestamp: timestamp, signature: invalid_signature)
+
+      assert_authentication_failure(rejected_conn)
+      refute rejected_conn.resp_body =~ invalid_signature
+
+      accepted_conn = post_signed(build_conn(), body, timestamp: timestamp)
+      assert_accepted_response(accepted_conn, "evt_123")
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+    end
+
+    test "rejects an expired timestamp before creating replay state", %{conn: conn} do
+      body = Jason.encode!(@valid_webhook)
+      expired_timestamp = shift_timestamp(current_timestamp(), -301)
+
+      rejected_conn = post_signed(conn, body, timestamp: expired_timestamp)
+
+      assert_authentication_failure(rejected_conn)
+
+      accepted_conn = post_signed(build_conn(), body, timestamp: current_timestamp())
+      assert_accepted_response(accepted_conn, "evt_123")
+      assert Repo.aggregate(ReceivedWebhook, :count) == 1
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+    end
   end
 
   test "the webhook route uses the API pipeline" do
@@ -388,12 +461,28 @@ defmodule IronholdWeb.WebhookControllerTest do
              )
   end
 
-  defp assert_conflict_response(conn) do
+  defp assert_accepted_response(conn, event_id) do
+    assert json_response(conn, 202) == %{
+             "data" => %{
+               "event_id" => event_id,
+               "status" => "accepted"
+             }
+           }
+  end
+
+  defp assert_conflict_response(conn, sensitive_values) do
     assert json_response(conn, 409) == %{
              "errors" => [
                %{"detail" => "a webhook with this id has already been received"}
              ]
            }
+
+    Enum.each(sensitive_values, &refute(conn.resp_body =~ &1))
+
+    Enum.each(
+      ["fingerprint", "signature", "replay_detected", "duplicate_event", "constraint"],
+      &refute(conn.resp_body =~ &1)
+    )
   end
 
   defp accept_json(conn), do: put_req_header(conn, "accept", "application/json")
@@ -454,6 +543,7 @@ defmodule IronholdWeb.WebhookControllerTest do
     assert conn.halted
     assert json_response(conn, 401) == @invalid_signature_response
     assert Repo.aggregate(ReceivedWebhook, :count) == 0
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 0
     refute Map.has_key?(conn.private, @replay_metadata_private_key)
   end
 
@@ -475,6 +565,13 @@ defmodule IronholdWeb.WebhookControllerTest do
   end
 
   defp current_timestamp, do: System.system_time(:second) |> Integer.to_string()
+
+  defp shift_timestamp(timestamp, seconds) do
+    timestamp
+    |> String.to_integer()
+    |> Kernel.+(seconds)
+    |> Integer.to_string()
+  end
 
   defp signature(header_id, timestamp, body) do
     ["v1.", header_id, ".", timestamp, ".", body]
