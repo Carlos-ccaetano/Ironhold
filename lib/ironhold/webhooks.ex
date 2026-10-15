@@ -3,6 +3,8 @@ defmodule Ironhold.Webhooks do
   Stores webhook envelopes received by Ironhold.
   """
 
+  import Ecto.Query, only: [from: 2]
+
   alias Ecto.Multi
   alias Ironhold.Repo
   alias Ironhold.Webhooks.{ReceivedWebhook, WebhookReplayClaim}
@@ -32,6 +34,16 @@ defmodule Ironhold.Webhooks do
     |> Multi.insert(:webhook, webhook_changeset)
     |> Repo.transaction()
     |> normalize_ingestion_result()
+  end
+
+  def prune_expired_replay_claims(reference_time) do
+    {deleted_count, _} =
+      Repo.delete_all(
+        from claim in WebhookReplayClaim,
+          where: claim.expires_at <= ^reference_time
+      )
+
+    deleted_count
   end
 
   defp put_received_at(attrs, received_at) do
