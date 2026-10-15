@@ -2,6 +2,8 @@ import Config
 
 config :ironhold, :webhook_signing_secret, "tidewake_test_secret_not_for_production"
 
+config :ironhold, Ironhold.Webhooks.ReplayCleanup, interval: :infinity
+
 database_config =
   case System.get_env("DATABASE_URL") do
     nil ->
