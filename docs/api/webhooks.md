@@ -59,7 +59,18 @@ The request boundary runs in this order:
 4. verify the timestamp and HMAC over the raw bytes;
 5. decode the same authenticated bytes as JSON;
 6. require `Tidewake-Id` to match the decoded body `id` exactly;
-7. validate the envelope and persist it.
+7. derive replay metadata from the already validated signature and authenticated timestamp;
+8. validate the envelope, then atomically persist its replay claim and received webhook.
+
+## Replay protection and idempotency
+
+An observer who captures a valid signed request could otherwise submit it repeatedly while its timestamp remains acceptable. [ADR 0005](../adr/0005-webhook-replay-protection.md) defines how Ironhold closes that replay window without treating every later Tidewake attempt as the same cryptographic event.
+
+An exact replay reuses the same body, timestamp, and validated signature. Ironhold hashes the complete validated signature with a versioned domain separator and stores only the resulting 64-character lowercase SHA-256 fingerprint. The raw signature is not recoverable from this value. The claim also stores `expires_at`, calculated as the authenticated signing timestamp plus 300 seconds.
+
+The public envelope shape is checked before persistence. The replay claim and `received_webhooks` row are then inserted in one PostgreSQL transaction. A unique index on the fingerprint decides concurrent exact replays: only one transaction can accept the claim. If webhook changeset validation or persistence fails, the claim insert rolls back.
+
+A retry signed with a new timestamp has a new signature and fingerprint, so it is not an exact cryptographic replay. The existing unique `event_id` constraint still rejects it as a duplicate event if that event was already accepted. The provisional new claim is rolled back. This also applies when the newly signed payload differs but retains an existing `event_id`.
 
 ## Responses
 
@@ -92,7 +103,7 @@ Ironhold returns `422 Unprocessable Entity` when an authenticated request reache
 }
 ```
 
-Ironhold returns `409 Conflict` when a webhook with the same `id` has already been accepted. Duplicate requests do not create another stored webhook:
+Ironhold returns `409 Conflict` for both an exact replay and a newly signed request whose `id` has already been accepted. The public response deliberately does not distinguish the internal `:replay_detected` and `:duplicate_event` reasons. Neither case creates another stored webhook, and a duplicate event does not leave a new replay claim:
 
 ```json
 {
@@ -112,8 +123,43 @@ Accepted ingestion emits Telemetry. Validation, duplicate-ID, and unsupported-me
 
 Each authentication event contains only `%{count: 1}` with empty metadata.
 
+Replay protection emits these additional events:
+
+- `[:ironhold, :webhooks, :replay, :claim_accepted]` with `%{count: 1}` and empty metadata after the transaction commits;
+- `[:ironhold, :webhooks, :replay, :detected]` with `%{count: 1}` and empty metadata for an exact replay;
+- `[:ironhold, :webhooks, :replay, :cleanup_completed]` with `count` and `duration`, plus `claims_removed` after a successful cleanup. Its metadata contains only `result` (`:ok` or `:error`) and `origin` (`:manual` or `:scheduled`).
+
+`IronholdWeb.Telemetry.metrics/0` exposes counters for accepted claims, detected replays, and completed cleanups, a sum of removed claims, and cleanup duration. Ironhold does not currently configure a metrics reporter, dashboard, or external alert.
+
+## Expiration and cleanup
+
+`Ironhold.Webhooks.ReplayCleanup` is part of the application supervision tree. It schedules the next cleanup after the current execution finishes, so executions do not overlap within one worker. Each run removes claims whose `expires_at` is less than or equal to its reference time in one database operation; repeated and multi-node executions are idempotent.
+
+The default interval is five minutes and is configured with application configuration:
+
+```elixir
+config :ironhold, Ironhold.Webhooks.ReplayCleanup, interval: :timer.minutes(5)
+```
+
+Tests set the interval to `:infinity` and use the explicit `Ironhold.Webhooks.ReplayCleanup.run_now/2` operation. There is no environment variable for the interval today.
+
+## Stored data boundary
+
+The replay-claim table stores only the irreversible fingerprint, `expires_at`, and `inserted_at`. It does not store the signature, shared secret, complete headers, raw request body, request URL, or client IP. Those values are also excluded from replay Telemetry. The accepted webhook record separately stores the decoded `event_id`, `event_type`, `payload`, and receipt time as part of the ingestion contract.
+
+## Demonstrate exact replay rejection locally
+
+With PostgreSQL available through the repository's Compose service, run the focused HTTP test:
+
+```sh
+docker compose up -d postgres
+MIX_ENV=test mix test test/ironhold_web/controllers/webhook_controller_test.exs:320 --trace
+```
+
+The test sends the same authenticated envelope twice through the Phoenix endpoint. It asserts that the first response is `202`, the second is the generic `409`, and PostgreSQL contains exactly one received webhook and one replay claim. The test configuration supplies a non-production signing secret; the command does not print it.
+
 ## Current limitations
 
-This boundary authenticates requests but does not process event-specific payloads or provide delivery status lookup. It does not yet provide replay protection, store used nonces or signatures, rotate or accept multiple simultaneous secrets, rate-limit ingestion, maintain a complete audit trail, or provide an operational dashboard.
+This boundary authenticates requests and rejects exact replays, but it does not process event-specific payloads or provide delivery status lookup. It does not rotate or accept multiple simultaneous secrets, rate-limit ingestion, provide administrative authentication, maintain a complete audit trail, export alerts, define deployment, or provide an operational dashboard.
 
-This is not an end-to-end production integration with Tidewake. Tidewake's Req adapter remains inactive, so real HTTP delivery, retries, backoff, and Tidewake-side SSRF protection are still pending.
+This is not an end-to-end production integration with Tidewake. Tidewake's Req adapter remains inactive, so real HTTP delivery and Tidewake retries remain pending.

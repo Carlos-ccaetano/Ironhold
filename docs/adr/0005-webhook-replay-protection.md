@@ -5,7 +5,7 @@
 
 ## Context
 
-[ADR 0003](0003-signed-webhook-verification.md) defines the signed Tidewake webhook contract, and [ADR 0004](0004-webhook-authentication-policy.md) defines the temporal acceptance window and generic authentication failure behavior. Ironhold now verifies the HMAC and timestamp before decoding and persisting a webhook, but an authenticated request can still be repeated while its timestamp remains inside the accepted window.
+[ADR 0003](0003-signed-webhook-verification.md) defines the signed Tidewake webhook contract, and [ADR 0004](0004-webhook-authentication-policy.md) defines the temporal acceptance window and generic authentication failure behavior. Ironhold verifies the HMAC and timestamp before decoding and persisting a webhook. Before this decision was implemented, an authenticated request could still be repeated while its timestamp remained inside the accepted window.
 
 The unique `received_webhooks.event_id` constraint provides persistence idempotency. It prevents two webhook rows from representing the same event, but it does not distinguish an exact reuse of authenticated signing material from a legitimate future Tidewake retry that uses the same event ID with a new timestamp and signature. Timestamp validation alone also cannot make that distinction because every replay within the accepted window has a valid timestamp.
 
@@ -17,7 +17,7 @@ Replay protection needs a durable, concurrency-safe decision that preserves this
 
 The existing HTTP media-type and bounded-body checks continue to run first. Ironhold must then complete HMAC verification and temporal-window validation before performing any replay lookup or claim. Unauthenticated, malformed, expired, or too-far-in-the-future requests must not create replay state or reveal whether matching state exists.
 
-After authentication succeeds, Ironhold derives a replay fingerprint from the complete signature value that has already been validated. The fingerprint is SHA-256 over a fixed, versioned Ironhold domain separator followed by the exact validated signature value. The persisted value is the 32-byte digest, not a hexadecimal copy of the signature. Including the validated signature's `v1=` prefix in the hashed input keeps the fingerprint tied to the signature version without storing the header itself.
+After authentication succeeds, Ironhold derives a replay fingerprint from the complete signature value that has already been validated. The fingerprint is SHA-256 over a fixed, versioned Ironhold domain separator followed by the exact validated signature value. The persisted value is the digest encoded as exactly 64 lowercase hexadecimal characters, not a copy of the signature. Including the validated signature's `v1=` prefix in the hashed input keeps the fingerprint tied to the signature version without storing the header itself.
 
 An exact repetition of the same authenticated envelope presents the same validated signature and therefore the same fingerprint. Ironhold must reject the repetition while its replay claim is active.
 
@@ -54,13 +54,13 @@ An exact replay of an accepted webhook encounters the fingerprint constraint fir
 
 Replay and duplicate-event outcomes use the same generic public conflict response so callers cannot use the response body to determine whether a particular signature has been seen. The existing `409 Conflict` duplicate response is the public baseline; it must not include the fingerprint, signature, timestamp, event existence details, or database constraint names.
 
-Internally, replay and duplicate `event_id` remain distinct bounded reasons. Telemetry and structured diagnostics may count those outcomes separately, but must not include the fingerprint, signature, secret, complete headers, raw body, decoded payload, or event ID as measurements or metadata.
+Internally, replay and duplicate `event_id` remain distinct bounded reasons. Ingestion Telemetry reports `:replay_detected` and `:duplicate_event` separately, while replay-specific Telemetry counts accepted claims and detected replays. These events do not include the fingerprint, signature, secret, complete headers, raw body, decoded payload, or event ID as measurements or metadata.
 
 ### Expired-claim cleanup
 
-A named process in `Ironhold.Application`'s supervision tree periodically removes expired claims from PostgreSQL in bounded batches. Cleanup is maintenance, not part of request acceptance: delayed cleanup may retain unusable rows longer, but must not delete an active claim or allow a temporally valid replay.
+A named process in `Ironhold.Application`'s supervision tree periodically removes expired claims from PostgreSQL with one set-based `DELETE`. Cleanup is maintenance, not part of request acceptance: delayed cleanup may retain unusable rows longer, but does not change timestamp validation.
 
-The cleanup process must be safe to run on more than one application node. Database predicates define expiration and deletion eligibility; correctness must not depend on one process being globally unique. The interval, batch size, and operational metrics will be selected during implementation and exposed through bounded configuration where needed.
+The cleanup process is safe to run on more than one application node. Database predicates define expiration and deletion eligibility; correctness does not depend on one process being globally unique. Claims with `expires_at` less than or equal to the cleanup reference time are removed. The worker schedules its next run after the current run completes, retries only after the configured interval following a failure, and defaults to a five-minute interval through application configuration.
 
 Ironhold will not add Oban solely to schedule this cleanup. A small supervised process and PostgreSQL are sufficient for this single periodic responsibility. A durable job system can be reconsidered if the application later acquires broader background-job requirements.
 
@@ -110,13 +110,13 @@ Rejected because Ironhold has no other durable background-job requirement. Addin
 
 - Every accepted webhook requires an additional insert and unique-index check in the ingestion transaction.
 - PostgreSQL availability is required for replay decisions as well as webhook persistence.
-- A supervised cleanup process and operational visibility for its progress must be added.
+- The supervised cleanup process and its Telemetry add a small amount of runtime and operational configuration.
 - Publicly combining replay and duplicate-event failures reduces client-visible diagnostic detail by design.
+
+## Implementation status
+
+The accepted policy is implemented by the replay-claim migration and schema, `Ironhold.Webhooks.ReplayFingerprint`, `Ironhold.Webhooks.ingest_authenticated_webhook/3`, the authenticated replay metadata attached by `IronholdWeb.Plugs.RequireMatchingWebhookId`, the controller integration, and `Ironhold.Webhooks.ReplayCleanup`. HTTP, context, concurrency, cleanup, and Telemetry tests cover exact replay, freshly signed duplicate events, rollback, unique-constraint arbitration, expiration cleanup, generic public failures, distinct internal reasons, and sensitive-data exclusion.
 
 ## Out of scope
 
-This ADR does not implement the claim schema, migration, transaction, cleanup process, controller behavior, Telemetry events, or tests. It does not change the HMAC wire format, timestamp window, existing `event_id` contract, shared-secret provisioning, secret rotation, rate limiting, downstream event processing, or audit-retention policy.
-
-## Follow-up
-
-Implement the PostgreSQL claim and atomic receive transaction in a focused change. That implementation must test exact replay, freshly signed retries, duplicate event IDs, transaction rollback, concurrent claims, expiration boundaries, cleanup, generic public failures, distinct internal reasons, and non-disclosure of signing and request material.
+This decision does not change the HMAC wire format, timestamp window, existing `event_id` contract, or shared-secret provisioning. Secret rotation, multiple simultaneous keys, rate limiting, administrative authentication, external alerting, deployment, Tidewake retries, downstream event processing, and a complete audit-retention policy remain unimplemented.

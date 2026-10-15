@@ -49,4 +49,4 @@ A request rejected for its content type or raw size must not create a `received_
 - Applying the byte limit before decoding bounds parser memory use and prevents oversized requests from reaching the database.
 - The rules make the public ingestion boundary explicit without weakening existing payload validation.
 - Rejected content cannot leak through responses, logs, or Telemetry.
-- HMAC verification, timestamp validation, and replay protection remain outside this decision and must be designed separately.
+- HMAC verification, timestamp validation, and replay protection remain outside this decision. They are governed separately by [ADR 0003](0003-signed-webhook-verification.md), [ADR 0004](0004-webhook-authentication-policy.md), and [ADR 0005](0005-webhook-replay-protection.md).
