@@ -1,6 +1,6 @@
 # Webhook ingestion API
 
-Ironhold exposes an authenticated receiving boundary for requests that follow the Tidewake webhook contract. Ironhold authenticates and records accepted event envelopes; this does not imply that Tidewake's production HTTP transport is active.
+Ironhold exposes an authenticated receiving boundary for requests that follow the Tidewake webhook contract. Tidewake implements secure outbound HTTP delivery and bounded automatic retries, while Ironhold authenticates and records accepted event envelopes. These implemented capabilities do not imply that the applications are deployed together as a production integration.
 
 ## Receive a webhook
 
@@ -149,19 +149,19 @@ Tests set the interval to `:infinity` and use the explicit `Ironhold.Webhooks.Re
 
 The replay-claim table stores only the irreversible fingerprint, `expires_at`, and `inserted_at`. It does not store the signature, shared secret, complete headers, raw request body, request URL, or client IP. Those values are also excluded from replay Telemetry. The accepted webhook record separately stores the decoded `event_id`, `event_type`, `payload`, and receipt time as part of the ingestion contract.
 
-## Demonstrate exact replay rejection locally
+## Demonstrate retry and replay behavior locally
 
 With PostgreSQL available through the repository's Compose service, run the focused HTTP test:
 
 ```sh
 docker compose up -d postgres
-MIX_ENV=test mix test test/ironhold_web/controllers/webhook_controller_test.exs:320 --trace
+MIX_ENV=test mix test test/ironhold_web/controllers/webhook_controller_test.exs
 ```
 
-The test sends the same authenticated envelope twice through the Phoenix endpoint. It asserts that the first response is `202`, the second is the generic `409`, and PostgreSQL contains exactly one received webhook and one replay claim. The test configuration supplies a non-production signing secret; the command does not print it.
+The test covers an initial `202`, a second `202` for the identical envelope with a fresh timestamp and signature, and a generic `409` when that second signed request is replayed exactly. PostgreSQL retains one received webhook and two replay claims for the two accepted signing attempts. The test configuration supplies a non-production signing secret; the command does not print it.
 
 ## Current limitations
 
 This boundary authenticates requests, rejects exact replays, and acknowledges freshly signed retries of an identical stored envelope, but it does not process event-specific payloads or provide delivery status lookup. It does not rotate or accept multiple simultaneous secrets, rate-limit ingestion, provide administrative authentication, maintain a complete audit trail, export alerts, define deployment, or provide an operational dashboard.
 
-This is not an end-to-end production integration with Tidewake. Tidewake's Req adapter remains inactive, so real HTTP delivery and Tidewake retries remain pending.
+This is not an end-to-end production deployment with Tidewake. Secure outbound HTTP delivery and bounded automatic retries are implemented in Tidewake, and Ironhold's receiver contract is compatible with them. Manual retry and its audit record, `Retry-After` support, an operational API or UI and dashboard, and deployment remain pending.
