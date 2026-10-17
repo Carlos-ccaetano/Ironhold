@@ -7,7 +7,7 @@
 
 [ADR 0003](0003-signed-webhook-verification.md) defines the signed Tidewake webhook contract, and [ADR 0004](0004-webhook-authentication-policy.md) defines the temporal acceptance window and generic authentication failure behavior. Ironhold verifies the HMAC and timestamp before decoding and persisting a webhook. Before this decision was implemented, an authenticated request could still be repeated while its timestamp remained inside the accepted window.
 
-The unique `received_webhooks.event_id` constraint provides persistence idempotency. It prevents two webhook rows from representing the same event, but it does not distinguish an exact reuse of authenticated signing material from a legitimate future Tidewake retry that uses the same event ID with a new timestamp and signature. Timestamp validation alone also cannot make that distinction because every replay within the accepted window has a valid timestamp.
+At the time of this decision, Tidewake had not yet implemented automatic retries. The unique `received_webhooks.event_id` constraint provided persistence idempotency. It prevented two webhook rows from representing the same event, but it could not distinguish an exact reuse of authenticated signing material from a legitimate planned Tidewake retry using the same event ID with a new timestamp and signature. Timestamp validation alone also could not make that distinction because every replay within the accepted window had a valid timestamp.
 
 Replay protection needs a durable, concurrency-safe decision that preserves this distinction, does not retain signing material, and cannot acknowledge a claim unless the corresponding webhook is persisted.
 
@@ -21,7 +21,7 @@ After authentication succeeds, Ironhold derives a replay fingerprint from the co
 
 An exact repetition of the same authenticated envelope presents the same validated signature and therefore the same fingerprint. Ironhold must reject the repetition while its replay claim is active.
 
-A Tidewake retry that signs the event again with a new timestamp produces a new signature and a new fingerprint. It is not a cryptographic replay, even when its `event_id`, event type, and payload are unchanged. That request proceeds to the existing event-id idempotency check. If the event was already persisted, the request is a duplicate event ID rather than a replay.
+A Tidewake retry that signs the event again with a new timestamp produces a new signature and a new fingerprint. It is not a cryptographic replay, even when its `event_id`, event type, and payload are unchanged. That request proceeds to the event-id idempotency check. Under the behavior considered when this decision was accepted, an already persisted event was classified as a duplicate event ID rather than a replay. The current idempotent acknowledgement behavior is recorded under Implementation status.
 
 The authenticated timestamp and signature must be made available only as bounded internal values for the replay decision after successful verification. The configured secret, raw or expected signature, complete signing headers, and raw request body must not be persisted.
 
@@ -41,14 +41,14 @@ The claim expires when the authenticated request leaves ADR 0004's temporal acce
 
 Creating the replay claim and inserting the `received_webhooks` row must occur in one PostgreSQL transaction owned by the webhook receive use case. The transaction attempts the replay claim before inserting the webhook so an exact concurrent repetition is classified as replay.
 
-If webhook validation or persistence fails for any reason, including a duplicate `event_id`, the transaction must roll back the replay claim. A database or application failure must not consume signing material for a webhook that Ironhold did not persist. Retrying that delivery with the same authenticated request can therefore succeed after a transient persistence failure.
+Under the behavior accepted in this decision, if webhook validation or persistence failed for any reason, including a duplicate `event_id`, the transaction had to roll back the replay claim. A database or application failure could not consume signing material for a webhook that Ironhold did not persist. Retrying that delivery with the same authenticated request could therefore succeed after a transient persistence failure. The current treatment of identical and conflicting event-ID reuse is recorded under Implementation status.
 
 The two database constraints retain separate meanings:
 
 - a replay-fingerprint conflict means the same validated signature was already accepted and claimed;
 - an `event_id` conflict means a separately authenticated request refers to an event already persisted.
 
-An exact replay of an accepted webhook encounters the fingerprint constraint first. A freshly signed Tidewake retry has a different fingerprint, reaches the event-id constraint, and rolls back its provisional claim when the duplicate event ID is reported. This ordering preserves future Tidewake retry behavior without weakening event idempotency.
+An exact replay of an accepted webhook encounters the fingerprint constraint first. Under the originally accepted behavior, a freshly signed Tidewake retry had a different fingerprint, reached the event-id constraint, and rolled back its provisional claim when the duplicate event ID was reported. This ordering was designed to preserve the distinction between a legitimate planned retry and a cryptographic replay without weakening event idempotency. The current idempotent acknowledgement refinement is recorded under Implementation status.
 
 ### Failure behavior and observability
 
@@ -86,7 +86,7 @@ Rejected because the raw signature is unnecessary signing material. A fixed-size
 
 ### Rely only on the unique event ID
 
-Rejected because event idempotency and cryptographic replay answer different questions. `event_id` cannot distinguish an exact repeated signature from a future Tidewake retry signed at a new time, and treating every retry as replay would erase useful internal semantics.
+Rejected because event idempotency and cryptographic replay answer different questions. `event_id` cannot distinguish an exact repeated signature from a planned Tidewake retry signed at a new time, and treating every retry as replay would erase useful internal semantics.
 
 ### Rely only on the timestamp window
 
@@ -103,7 +103,7 @@ Rejected because Ironhold has no other durable background-job requirement. Addin
 - Exact authenticated replays are rejected consistently across nodes and restarts.
 - Claim and webhook persistence succeed or fail together.
 - Concurrent acceptance is decided by database constraints without a process-local race.
-- Future Tidewake retries with fresh signing material remain distinguishable from exact replay.
+- The design keeps the then-planned Tidewake retries with fresh signing material distinguishable from exact replay.
 - Replay-state retention excludes signatures, secrets, headers, and bodies.
 
 ### Negative
@@ -115,8 +115,12 @@ Rejected because Ironhold has no other durable background-job requirement. Addin
 
 ## Implementation status
 
-The accepted policy is implemented by the replay-claim migration and schema, `Ironhold.Webhooks.ReplayFingerprint`, `Ironhold.Webhooks.ingest_authenticated_webhook/3`, the authenticated replay metadata attached by `IronholdWeb.Plugs.RequireMatchingWebhookId`, the controller integration, and `Ironhold.Webhooks.ReplayCleanup`. HTTP, context, concurrency, cleanup, and Telemetry tests cover exact replay, freshly signed duplicate events, rollback, unique-constraint arbitration, expiration cleanup, generic public failures, distinct internal reasons, and sensitive-data exclusion.
+The accepted policy is implemented by the replay-claim migration and schema, `Ironhold.Webhooks.ReplayFingerprint`, `Ironhold.Webhooks.ingest_authenticated_webhook/3`, the authenticated replay metadata attached by `IronholdWeb.Plugs.RequireMatchingWebhookId`, the controller integration, and `Ironhold.Webhooks.ReplayCleanup`.
+
+After this decision was accepted, event-id handling was refined for the implemented retry contract. An identical envelope with a new timestamp and signature retains its new replay claim, reuses the existing webhook row, and receives `202 Accepted`. Repeating that signed request exactly is a cryptographic replay and receives `409 Conflict`. Reusing the same `event_id` with a different event type or payload is a duplicate-event conflict, rolls back the provisional claim, and also receives the generic `409 Conflict` response.
+
+Tidewake now implements secure outbound delivery and bounded automatic retries with fresh signing material. Ironhold does not schedule sender retries; it authenticates and idempotently acknowledges legitimate retries at the receiving boundary. HTTP, context, concurrency, cleanup, and Telemetry tests cover exact replay, freshly signed idempotent retries, conflicting duplicate events, rollback, unique-constraint arbitration, expiration cleanup, generic public failures, distinct internal reasons, and sensitive-data exclusion.
 
 ## Out of scope
 
-This decision does not change the HMAC wire format, timestamp window, existing `event_id` contract, or shared-secret provisioning. Secret rotation, multiple simultaneous keys, rate limiting, administrative authentication, external alerting, deployment, Tidewake retries, downstream event processing, and a complete audit-retention policy remain unimplemented.
+This decision does not change the HMAC wire format, timestamp window, existing `event_id` contract, or shared-secret provisioning, and it does not assign sender retry scheduling to Ironhold. Secret rotation, multiple simultaneous keys, rate limiting, administrative authentication, external alerting, downstream event processing, a complete audit-retention policy, manual retry and its audit record, `Retry-After` support, an operational API or UI, and production deployment remain unimplemented.
