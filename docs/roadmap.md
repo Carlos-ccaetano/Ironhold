@@ -50,9 +50,9 @@ These persistence and HTTP boundaries are now combined with the authenticated bo
 
 ## 5. Operational protection and audit
 
-- Add rate limiting and abuse controls
-- Add manual retry with a dedicated audit record
-- Define `Retry-After` handling for receiver responses and sender scheduling
+- Add rate limiting and abuse controls to Ironhold; a future rate-limited response may emit `Retry-After` as receiver guidance without controlling sender scheduling
+- Cross-repository — Tidewake: expose manual retry with a dedicated audit record for each manual retry request
+- Cross-repository — Tidewake: interpret `Retry-After` from receiver responses when rescheduling outbound deliveries
 - Define structured audit records, retention, and restricted access
 - Export the declared Telemetry metrics and add useful traces and external alerts
 
@@ -63,4 +63,4 @@ These persistence and HTTP boundaries are now combined with the authenticated bo
 
 The project foundation, authenticated webhook ingestion, HTTP boundaries, field limits, durable replay protection, supervised claim cleanup, and ingestion, authentication, and replay Telemetry are implemented. Tidewake's secure outbound HTTP transport and bounded automatic retries are also implemented, and Ironhold acknowledges an identical envelope with fresh signing material idempotently while rejecting an exact replay with `409`.
 
-End-to-end production deployment is not complete. Manual retry and its audit record, `Retry-After` support, an operational API or UI and dashboard, and deployment remain planned work.
+End-to-end production deployment is not complete. Cross-repository Tidewake work still includes manual retry, an audit record for each manual retry request, and sender-side interpretation of `Retry-After` when rescheduling deliveries. Ironhold work still includes rate limiting, an operational API or UI and dashboard, and deployment. A future Ironhold rate limiter may emit `Retry-After`, but that receiver signal does not give Ironhold control over Tidewake's delivery schedule.
