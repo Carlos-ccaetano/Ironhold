@@ -17,4 +17,6 @@ Please avoid accessing data that is not yours, disrupting services, or publishin
 
 ## Current scope
 
-This foundation does not yet implement webhook ingestion, HMAC validation, replay protection, rate limiting, authentication, complete auditing, or a dashboard. Their absence is known roadmap work, not a claim that those protections exist.
+Ironhold implements authenticated webhook ingestion at `POST /api/webhooks`, with media-type and body-size limits, HMAC-SHA256 verification and timestamp checks. PostgreSQL atomically persists replay claims and received webhooks, with event idempotency and acknowledgement of freshly signed retries of an identical stored envelope. See the [current HTTP contract](docs/api/webhooks.md) for the boundaries and failure behavior.
+
+These implemented paths are part of the current security surface. Administrative authentication, rate limiting, broader audit features and a dashboard remain roadmap work.
