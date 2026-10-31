@@ -44,6 +44,50 @@ defmodule IronholdWeb.WebhookControllerTest do
            }
   end
 
+  for missing <- [[:type], [:data], [:type, :data]] do
+    test "POST /api/webhooks rejects signed body missing #{inspect(missing)} despite query fields",
+         %{conn: conn} do
+      body = Jason.encode!(Map.drop(@valid_webhook, unquote(missing)))
+      path = "/api/webhooks?" <> Plug.Conn.Query.encode(@valid_webhook)
+      attach_ingestion_events(@valid_webhook.id)
+
+      conn = post_signed(conn, body, path: path)
+
+      assert conn.params["type"] == @valid_webhook.type
+      assert conn.params["data"] == Jason.decode!(Jason.encode!(@valid_webhook.data))
+      invalid_webhook_response(conn)
+      assert Repo.aggregate(ReceivedWebhook, :count) == 0
+      assert Repo.aggregate(WebhookReplayClaim, :count) == 0
+
+      assert_receive {:ingestion_event, @rejected_event, %{count: 1}, %{reason: :validation},
+                      false}
+
+      refute_receive {:ingestion_event, _, _, _, _}
+    end
+  end
+
+  test "POST /api/webhooks persists only the signed envelope despite conflicting query fields",
+       %{conn: conn} do
+    body = Jason.encode!(@valid_webhook)
+
+    query = %{
+      id: "evt_query",
+      type: "query.type",
+      data: %{status: "query"},
+      received_at: "2000-01-01T00:00:00Z"
+    }
+
+    conn = post_signed(conn, body, path: "/api/webhooks?" <> Plug.Conn.Query.encode(query))
+
+    assert_accepted_response(conn, @valid_webhook.id)
+    webhook = Repo.get_by!(ReceivedWebhook, event_id: @valid_webhook.id)
+    assert webhook.event_type == @valid_webhook.type
+    assert webhook.payload == Jason.decode!(body)["data"]
+    refute webhook.received_at == ~U[2000-01-01 00:00:00Z]
+    assert Repo.aggregate(ReceivedWebhook, :count) == 1
+    assert Repo.aggregate(WebhookReplayClaim, :count) == 1
+  end
+
   test "POST /api/webhooks exposes only safe replay metadata after authentication", %{conn: conn} do
     body = Jason.encode!(%{@valid_webhook | id: "evt_replay_metadata"})
     timestamp = current_timestamp()
@@ -611,7 +655,7 @@ defmodule IronholdWeb.WebhookControllerTest do
     |> put_req_header("tidewake-id", header_id)
     |> put_req_header("tidewake-timestamp", timestamp)
     |> put_req_header("tidewake-signature", signature)
-    |> post(~p"/api/webhooks", body)
+    |> post(Keyword.get(opts, :path, ~p"/api/webhooks"), body)
   end
 
   defp post_with_content_type(conn, body, content_type) do

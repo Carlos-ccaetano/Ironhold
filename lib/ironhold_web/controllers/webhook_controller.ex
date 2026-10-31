@@ -19,9 +19,9 @@ defmodule IronholdWeb.WebhookController do
             }
           }
         } = conn,
-        params
+        _params
       ) do
-    with {:ok, attrs} <- webhook_attrs(params),
+    with {:ok, attrs} <- webhook_attrs(conn.body_params),
          {:ok, webhook} <-
            Webhooks.ingest_authenticated_webhook(attrs, fingerprint, expires_at) do
       Telemetry.emit_ingestion_accepted()
