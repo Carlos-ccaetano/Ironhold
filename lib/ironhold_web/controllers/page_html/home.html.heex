@@ -1,5 +1,89 @@
 <main class="page">
-  <p class="eyebrow">Ironhold</p>
-  <h1>Foundation in development</h1>
-  <p>Ironhold is a foundation in development for the secure and auditable receipt of webhooks.</p>
+  <p class="eyebrow">Ironhold · Pre-release</p>
+  <h1>Receive signed webhooks</h1>
+  <p>
+    Ironhold authenticates webhook requests, rejects exact replays, and stores accepted events
+    idempotently in PostgreSQL.
+  </p>
+  <p>Built with Elixir, Phoenix, PostgreSQL, HMAC-SHA256, and ExUnit.</p>
+
+  <section aria-labelledby="capabilities">
+    <h2 id="capabilities">Implemented and tested</h2>
+    <ul>
+      <li>
+        <strong>Authenticate before storing:</strong> HMAC-SHA256 over the exact request bytes,
+        timestamp verification, JSON content validation, and request size limits.
+      </li>
+      <li>
+        <strong>Separate retries from replays:</strong> cryptographic replay protection and
+        idempotency by event ID, type, and payload, with transactional PostgreSQL persistence.
+      </li>
+      <li>
+        <strong>Maintain and observe:</strong> replay claim expiration and supervised cleanup,
+        Telemetry events and metrics, and automated tests.
+      </li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="responses">
+    <h2 id="responses">Retries and replays</h2>
+    <p>
+      A legitimate retry with a fresh timestamp and signature is not an exact replay.
+      <code>POST /api/webhooks</code>
+      responds as follows for authenticated, valid envelopes:
+    </p>
+    <table aria-labelledby="responses">
+      <thead>
+        <tr>
+          <th scope="col">Request</th>
+          <th scope="col">Response</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>First valid webhook</td>
+          <td>202 Accepted</td>
+        </tr>
+        <tr>
+          <td>Same event ID, type, and payload with a fresh timestamp and signature</td>
+          <td>202 Accepted</td>
+        </tr>
+        <tr>
+          <td>Exact signature replay or the same event ID with conflicting content</td>
+          <td>409 Conflict</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      Both conflict cases return the same generic response. An accepted identical retry does not
+      create another stored event.
+    </p>
+  </section>
+
+  <section aria-labelledby="limitations">
+    <h2 id="limitations">Pre-release limitations</h2>
+    <p>
+      Ingestion rate limiting, signing secret rotation, broader operational auditing and retention,
+      a dashboard, external metrics reporting, and alerts remain future work. Production deployment
+      is not proven; automated tests and green CI do not establish production readiness.
+    </p>
+  </section>
+
+  <section aria-labelledby="documentation">
+    <h2 id="documentation">Contract and companion project</h2>
+    <p>
+      Tidewake produces and sends webhooks; Ironhold is a complementary receiver. They are independent
+      systems and repositories, with no proven joint production deployment.
+    </p>
+    <p>
+      <a
+        class="eyebrow"
+        href="https://github.com/Carlos-ccaetano/Ironhold/blob/main/docs/api/webhooks.md"
+      >
+        HTTP contract
+      </a>
+      ·
+      <a class="eyebrow" href="https://github.com/Carlos-ccaetano/Tidewake">Tidewake repository</a>
+    </p>
+  </section>
 </main>
