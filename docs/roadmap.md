@@ -51,8 +51,8 @@ These persistence and HTTP boundaries are now combined with the authenticated bo
 ## 5. Operational protection and audit
 
 - Add rate limiting and abuse controls to Ironhold; a future rate-limited response may emit `Retry-After` as receiver guidance without controlling sender scheduling
-- Cross-repository — Tidewake: expose manual retry with a dedicated audit record for each manual retry request
-- Cross-repository — Tidewake: interpret `Retry-After` from receiver responses when rescheduling outbound deliveries
+- Cross-repository — Tidewake, implemented: [admin-only manual retry POST with persisted audit decisions and paginated audit GET](https://github.com/Carlos-ccaetano/Tidewake/blob/main/docs/api/manual-retries.md) uses project-bound service-account authorization and per-account POST admission; exhausted POST admission returns `429` with `Retry-After`
+- Cross-repository — Tidewake, pending: interpret `Retry-After` from webhook destinations when rescheduling outbound deliveries; the manual retry API's own `429` admission response does not implement this sender behavior
 - Define structured audit records, retention, and restricted access
 - Export the declared Telemetry metrics and add useful traces and external alerts
 
@@ -63,4 +63,4 @@ These persistence and HTTP boundaries are now combined with the authenticated bo
 
 The project foundation, authenticated webhook ingestion, HTTP boundaries, field limits, durable replay protection, supervised claim cleanup, and ingestion, authentication, and replay Telemetry are implemented. Tidewake's secure outbound HTTP transport and bounded automatic retries are also implemented, and Ironhold acknowledges an identical envelope with fresh signing material idempotently while rejecting an exact replay with `409`.
 
-End-to-end production deployment is not complete. Cross-repository Tidewake work still includes manual retry, an audit record for each manual retry request, and sender-side interpretation of `Retry-After` when rescheduling deliveries. Ironhold work still includes rate limiting, an operational API or UI and dashboard, and deployment. A future Ironhold rate limiter may emit `Retry-After`, but that receiver signal does not give Ironhold control over Tidewake's delivery schedule.
+End-to-end production validation and deployment remain pending. Tidewake's authenticated manual retry and audit APIs are implemented; sender-side interpretation of `Retry-After` received from webhook destinations remains pending. Ironhold work still includes ingestion rate limiting, HMAC secret rotation, broader operational auditing and retention, administrative authentication, an operational API or UI and dashboard, and external metrics reporting and alerts. A future Ironhold rate limiter may emit `Retry-After`, but that receiver signal does not give Ironhold control over Tidewake's delivery schedule.
