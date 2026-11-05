@@ -10,6 +10,53 @@ Signed webhook delivery can involve both legitimate retries and captured request
 
 **Core stack:** Elixir 1.18 · Erlang/OTP 27 · Phoenix 1.8 · PostgreSQL 16 · HMAC-SHA256 · Telemetry · ExUnit.
 
+## Architecture Overview
+
+```mermaid
+flowchart TB
+    accTitle: Ironhold authenticated reception, replay protection and event idempotency
+    accDescr: Tidewake sends a signed POST to Ironhold's Phoenix endpoint. Content type and body size are checked; timestamp and HMAC authenticate exact raw bytes before JSON decoding and header-body ID matching. The controller calls the Webhooks context, whose Ecto.Multi transaction claims the signature fingerprint and inserts or compares the event in Ironhold's separate PostgreSQL database. Supervised cleanup removes expired claims. HTTP responses acknowledge acceptance or reject requests.
+
+    subgraph tidewake["Tidewake — independent sender"]
+        twdb[("PostgreSQL / Tidewake<br/>Events + deliveries + jobs")]
+        sender["Signed HTTP delivery"]
+        twdb -->|"Oban execution"| sender
+    end
+    subgraph ironhold["Ironhold — reception"]
+        endpoint["Phoenix Endpoint"]
+        bounds["JSON media type<br/>Body-size limit"]
+        auth["HMAC-SHA256<br/>Timestamp + raw bytes"]
+        match["Decode verified JSON<br/>Match header/body ID"]
+        controller["Webhook Controller<br/>Envelope checks"]
+        context["Webhooks context<br/>Ecto.Multi"]
+        ihdb[("PostgreSQL / Ironhold<br/>Replay claims<br/>Received webhooks")]
+        cleanup["Replay cleanup<br/>Supervised process"]
+        response["HTTP response"]
+
+        endpoint --> bounds
+        bounds --> auth
+        auth --> match
+        match --> controller
+        controller --> context
+        context -->|"replay claim<br/>event idempotency"| ihdb
+        context -->|"result via controller"| response
+        cleanup -->|"prune claims"| ihdb
+    end
+    sender -->|"POST /api/webhooks"| endpoint
+```
+
+Ironhold owns the receiving boundary. Phoenix checks the media type and bounded body, validates the timestamp and HMAC over the exact raw bytes, then decodes those same bytes and matches the authenticated header ID to the body ID. The controller validates the envelope and delegates to the Webhooks context. Its `Ecto.Multi` transaction claims the signing fingerprint before inserting or comparing the event; a conflicting event rolls back the provisional claim. Both stores belong to Ironhold's PostgreSQL database, separate from Tidewake's. Supervised cleanup periodically prunes expired claims.
+
+**Authentication** proves possession of the shared secret and byte integrity within the timestamp window. **Replay protection** rejects reuse of an accepted signing attempt. **Event idempotency** acknowledges the same stored ID, type, and decoded payload when signed with a new timestamp and signature, retaining one webhook row and the new claim. The diagram follows the authenticated request path; authentication failures stop before persistence.
+
+| Main response | Meaning |
+| --- | --- |
+| `202 Accepted` | Accepted / idempotent acknowledgement. |
+| `409 Conflict` | Exact replay or conflicting event content. |
+| `401 Unauthorized` | Authentication failure. |
+
+[Detailed architecture](docs/architecture.md) · [Full HTTP contract and other responses](docs/api/webhooks.md) · [Tidewake delivery](https://github.com/Carlos-ccaetano/Tidewake) · [Real local Tidewake → Ironhold demonstration](https://github.com/Carlos-ccaetano/Tidewake/blob/main/docs/demo/README.md)
+
 ## Current status
 
 ### Implemented and tested
