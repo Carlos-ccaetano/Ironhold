@@ -16,6 +16,9 @@ defmodule Ironhold.Application do
   end
 
   @impl true
+  def stop(_state), do: IronholdWeb.MetricEvents.detach()
+
+  @impl true
   def config_change(changed, _new, removed) do
     IronholdWeb.Endpoint.config_change(changed, removed)
     :ok

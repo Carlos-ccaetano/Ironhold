@@ -22,6 +22,8 @@ defmodule IronholdWeb.Telemetry do
 
   @impl true
   def init(_arg) do
+    :ok = IronholdWeb.MetricEvents.attach()
+
     children = [
       {:telemetry_poller, measurements: [], period: 10_000}
     ]
@@ -99,6 +101,10 @@ defmodule IronholdWeb.Telemetry do
       counter("ironhold.webhooks.authentication.verified.count"),
       counter("ironhold.webhooks.authentication.rejected.count"),
       counter("ironhold.webhooks.authentication.identifier_mismatch.count"),
+      summary("phoenix.router_dispatch.exception.duration",
+        tags: [:route, :kind],
+        unit: {:native, :millisecond}
+      ),
       summary("phoenix.endpoint.stop.duration", unit: {:native, :millisecond}),
       summary("phoenix.router_dispatch.stop.duration",
         tags: [:route],
@@ -107,5 +113,6 @@ defmodule IronholdWeb.Telemetry do
       summary("ironhold.repo.query.total_time", unit: {:native, :millisecond}),
       summary("ironhold.repo.query.queue_time", unit: {:native, :millisecond})
     ]
+    |> Enum.map(&IronholdWeb.MetricEvents.metric/1)
   end
 end
