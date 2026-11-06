@@ -69,6 +69,8 @@ Ironhold owns the receiving boundary. Phoenix checks the media type and bounded 
 
 Ingestion rate limiting, receiver `Retry-After` guidance, signing secret rotation and overlapping secrets, broader operational auditing and retention, administrative authentication, a dashboard, external metrics reporting and alerts remain pending. Production deployment and operational validation are not established. Ironhold accepts and stores envelopes; it does not process event-specific payloads.
 
+[Telemetry privacy](docs/telemetry-privacy.md) defines the allowlisted metric boundary, internal library metadata, logging tradeoffs and remaining reporter/alert work.
+
 ## Documentation
 
 - **API and design:** [HTTP webhook contract](docs/api/webhooks.md) · [Architecture](docs/architecture.md) · [Roadmap](docs/roadmap.md)
